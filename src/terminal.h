@@ -1,6 +1,7 @@
 #pragma once
 #include "review.h"
 #include <chrono>
+#include <functional>
 #include <termios.h>
 
 namespace td {
@@ -54,7 +55,10 @@ public:
     SecretBytes Input(std::string_view title, const ReviewLines& introduction, std::string_view prompt,
         size_t limit, SecretInput* secret = nullptr, SecretBytes initial = {}, std::string error = {}, bool warning = false,
         std::string_view help = {});
-    SecretBytes Mnemonic(unsigned count = 0);
+    // Framebuffer Chinese entry is injected so terminal-only programs do not link display code.
+    using ChineseInput = std::function<SecretBytes(Terminal&, size_t count)>;
+    // A zero count asks for the phrase length; Chinese entry is offered only then.
+    SecretBytes Mnemonic(unsigned count = 0, const ChineseInput& chinese = {});
     SecretBytes ManualEntropy(ManualSource source, unsigned words);
     void BackupWords(std::span<const unsigned char> mnemonic, bool reviewing = false);
     bool ReviewRecoveryWords(std::span<const unsigned char> mnemonic, const ReviewScreen& review);

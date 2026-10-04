@@ -1,4 +1,5 @@
 #include "keys.h"
+#include "pinyin.h"
 #include "policy.h"
 
 #include <base58.h>
@@ -80,6 +81,40 @@ void Seeds()
         Reject([&] { td::MnemonicSeed(Bytes(MNEMONIC), Bytes(bad)); });
     }
     std::puts("PASS: BIP39 known seed, invalid input, ASCII limits and exact passphrase preservation");
+}
+
+void ChineseSeeds()
+{
+    // Index-for-index translation of MNEMONIC: 的 is word 0 (abandon), 在 is word 3 (about).
+    const std::string chinese = "的 的 的 的 的 的 的 的 的 的 的 在";
+    Check(td::ChineseWordIndex("的") == 0 && td::ChineseWordIndex("歇") == 2047, "Chinese word-list endpoints");
+    for (const auto& word : {std::string(""), std::string("的 "), std::string("龘"), std::string("abandon"),
+            std::string("\xe7\x9a"), std::string("的的")}) {
+        Reject([&] { td::ChineseWordIndex(word); });
+    }
+    const auto english = td::EnglishMnemonic(Bytes(chinese));
+    Check(std::string(english.begin(), english.end()) == MNEMONIC, "Chinese words map to English words by index");
+    const auto copy = td::EnglishMnemonic(Bytes(MNEMONIC));
+    Check(std::string(copy.begin(), copy.end()) == MNEMONIC, "English phrases pass through unchanged");
+    Check(td::MnemonicSeed(Bytes(chinese), Bytes("TREZOR")) == td::MnemonicSeed(Bytes(MNEMONIC), Bytes("TREZOR")),
+        "Chinese seed derives from the English phrase");
+    for (const auto& bad : std::vector<std::string>{"的 的 的 的 的 的 的 的 的 的 的 的", chinese + " ", " " + chinese,
+            "的  的 的 的 的 的 的 的 的 的 的 在", "abandon 的 的 的 的 的 的 的 的 的 的 在", "的的 的 的 的 的 的 的 的 的 的 在"}) {
+        Reject([&] { td::MnemonicSeed(Bytes(bad), {}); });
+    }
+    const auto de = td::PinyinCandidates("de");
+    Check(!de.empty() && de.front() == 0, "Primary readings come first");
+    const auto shi = td::PinyinCandidates("shi");
+    const auto is = std::find(shi.begin(), shi.end(), 2), ten = std::find(shi.begin(), shi.end(), 63);
+    Check(is != shi.end() && ten != shi.end() && is < ten, "Pinyin finds matching words in wordlist order"); // 是, 十
+    Check(td::PinyinCandidates("").empty() && td::PinyinCandidates("xyz").empty() && td::PinyinCandidates("sh").empty(),
+        "Pinyin matches whole syllables only");
+    for (unsigned index = 0; index < 2048; ++index) {
+        const auto glyph = td::HanziGlyph(index);
+        Check(std::any_of(glyph.begin(), glyph.end(), [](auto row) { return row != 0; }), "Every Chinese word has a glyph");
+    }
+    Reject([] { td::HanziGlyph(2048); });
+    std::puts("PASS: Chinese BIP39 words, pinyin candidates and English seed derivation");
 }
 
 void Policies()
@@ -216,6 +251,7 @@ int main()
         ECC_Context context;
         SelectParams(ChainType::REGTEST);
         Seeds();
+        ChineseSeeds();
         Policies();
         Identifiers();
         return 0;

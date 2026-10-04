@@ -15,7 +15,8 @@ bool Terminal::ReviewRecoveryWords(std::span<const unsigned char> mnemonic, cons
         [&] { BackupWords(mnemonic, true); }, qr ? "S: Show words/QR" : "S: Show words");
 }
 
-std::unique_ptr<Keys> StartSession(Terminal& terminal, const std::function<QRMessage()>& scan)
+std::unique_ptr<Keys> StartSession(Terminal& terminal, const std::function<QRMessage()>& scan,
+    const std::function<SecretBytes(Terminal&, size_t)>& chinese)
 {
     while (true) {
         try {
@@ -34,11 +35,18 @@ std::unique_ptr<Keys> StartSession(Terminal& terminal, const std::function<QRMes
                     "Continue to use them for this session.", "", "If your wallet uses a passphrase, you'll enter it next."},
                     {message.type == "seedqr" ? "Format: Standard SeedQR" : "Format: CompactSeedQR", "Language: English BIP39",
                         "A seed QR does not include your wallet passphrase or multisig wallet setup."}};
-            } else mnemonic = choice == 1 ? terminal.Mnemonic() : NewMnemonic(terminal);
+            } else mnemonic = choice == 1 ? terminal.Mnemonic(0, chinese) : NewMnemonic(terminal);
             if (choice == 1) {
+                // Review, word display and SeedQR handle English text. Keys derive
+                // from the English words either way, so converting here changes nothing.
+                const bool chinese_words = std::any_of(mnemonic.begin(), mnemonic.end(), [](auto c) { return c >= 0x80; });
+                if (chinese_words) mnemonic = EnglishMnemonic(mnemonic);
                 const auto count = 1 + std::count(mnemonic.begin(), mnemonic.end(), ' ');
+                ReviewLines details;
+                if (chinese_words) details = {"Language: Chinese (Simplified) BIP39",
+                    "Shown as the English BIP39 words at the same list positions. Keys derive from these English words."};
                 review = {"Recovery words entered", {"You entered " + std::to_string(count) + " recovery words.", "",
-                    "Continue to use them for this session.", "", "If your wallet uses a passphrase, you'll enter it next."}, {}};
+                    "Continue to use them for this session.", "", "If your wallet uses a passphrase, you'll enter it next."}, details};
             }
             if (choice != 2 && !terminal.ReviewRecoveryWords(mnemonic, review)) continue;
             while (true) {

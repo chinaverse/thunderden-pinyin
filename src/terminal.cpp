@@ -376,11 +376,23 @@ SecretBytes Terminal::Input(std::string_view title, const ReviewLines& introduct
     }
 }
 
-SecretBytes Terminal::Mnemonic(unsigned count)
+SecretBytes Terminal::Mnemonic(unsigned count, const ChineseInput& chinese)
 {
-    if (!count) count = 12 + 3 * Menu("Your recovery phrase",
-        {"12 words", "15 words", "18 words", "21 words", "24 words"},
-        "How many words are in your wallet backup?");
+    if (!count) {
+        const ReviewLines sizes{"12 words", "15 words", "18 words", "21 words", "24 words"};
+        auto choices = sizes;
+        if (chinese) choices.push_back("Chinese words (pinyin input)");
+        const int choice = Menu("Your recovery phrase", choices, "How many words are in your wallet backup?");
+        if (chinese && choice == 5) {
+            Notice("Chinese recovery words", {"Use this for a backup written with the BIP39 Chinese (Simplified) wordlist.", "",
+                "Thunder Den keeps the words in Chinese while you enter them. Before creating keys, it replaces each "
+                "Chinese word with the English BIP39 word at the same list position.", "",
+                "Keys therefore match the English version of your phrase. Wallets that create keys from the Chinese "
+                "text itself give a different wallet; check that the fingerprint matches your wallet app."});
+            return chinese(*this, 12 + 3 * Menu("Your Chinese recovery phrase", sizes, "How many words are in your wallet backup?"));
+        }
+        count = 12 + 3 * choice;
+    }
     Require(count >= 12 && count <= 24 && count % 3 == 0, "Invalid recovery word count");
     SecretInput visibility;
     std::string error;

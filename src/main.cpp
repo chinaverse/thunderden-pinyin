@@ -2,6 +2,7 @@
 #include "wallet_qr.h"
 #include "hardware.h"
 #include "isolation.h"
+#include "pinyin.h"
 #include "scan.h"
 #include "qr_commands.h"
 #include "address_check.h"
@@ -104,7 +105,7 @@ int main(int argc, char** argv)
         td::PrepareSigner(); // Before any recovery input or private key exists.
         ECC_Context context;
         std::unique_ptr<td::Keys> session;
-        while (!(session = td::StartSession(terminal, [&] { return Scan(terminal, true); }))) {
+        while (!(session = td::StartSession(terminal, [&] { return Scan(terminal, true); }, td::ChineseMnemonic))) {
             Network(terminal);
         }
         const auto& keys = *session;

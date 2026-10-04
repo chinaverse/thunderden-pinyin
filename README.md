@@ -63,6 +63,8 @@ image.
 ## Features
 
 - English BIP39 recovery words with an optional printable ASCII passphrase.
+- Chinese (Simplified) BIP39 recovery words entered with pinyin; keys derive from
+  the equivalent English phrase.
 - [SeedQR and CompactSeedQR backups](docs/SEED_QR.md) for 12/24 words, with explicit
   import confirmation and a seed-first menu (included from preview 10).
 - [Generate 12 or 24 recovery words](docs/ENTROPY.md) using Bitcoin Core randomness,
