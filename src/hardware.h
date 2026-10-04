@@ -34,5 +34,13 @@ public:
     Display& operator=(const Display&) = delete;
     void Preview(std::span<const uint8_t> gray, unsigned width, unsigned height, double progress);
     void QR(const QRImage& image, std::string_view caption);
+    // A text grid in console-font cells, for screens the Linux console cannot
+    // render. Out-of-range cells are skipped.
+    unsigned Columns() const { return variable_.xres / font_width_; }
+    unsigned Rows() const { return variable_.yres / font_height_; }
+    void ClearRow(unsigned row);
+    unsigned Text(unsigned column, unsigned row, std::string_view text, uint8_t gray = 239);
+    // Draws one 16x16 Chinese glyph across two cells and returns the next column.
+    unsigned Hanzi(unsigned column, unsigned row, std::span<const uint8_t, 32> glyph, uint8_t gray = 239);
 };
 }

@@ -2,6 +2,7 @@
 #include "wallet_qr.h"
 #include "hardware.h"
 #include "isolation.h"
+#include "pinyin.h"
 #include "scan.h"
 #include "qr_commands.h"
 
@@ -105,7 +106,7 @@ int main(int argc, char** argv)
         std::optional<td::ApprovedWallet> loaded_wallet;
         const auto keys = [&]() -> const td::Keys& {
             if (!session) {
-                const auto mnemonic = terminal.Mnemonic();
+                const auto mnemonic = terminal.Mnemonic(td::ChineseMnemonic);
                 while (!session) {
                     SecretInput visibility;
                     const auto passphrase = terminal.Input("Wallet passphrase (optional)", {

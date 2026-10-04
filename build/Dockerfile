@@ -27,6 +27,19 @@ ARG BIP39_WORDLIST_SHA256
 RUN curl --fail --location --retry 3 "$BIP39_WORDLIST_URL" -o /opt/bip39-english.txt \
     && printf '%s  %s\n' "$BIP39_WORDLIST_SHA256" /opt/bip39-english.txt | sha256sum -c -
 
+ARG BIP39_CHINESE_WORDLIST_URL
+ARG BIP39_CHINESE_WORDLIST_SHA256
+ARG UNIFONT_URL
+ARG UNIFONT_SHA256
+ARG UNIFONT_HEX_SHA256
+RUN curl --fail --location --retry 3 "$BIP39_CHINESE_WORDLIST_URL" -o /opt/bip39-chinese.txt \
+    && printf '%s  %s\n' "$BIP39_CHINESE_WORDLIST_SHA256" /opt/bip39-chinese.txt | sha256sum -c - \
+    && curl --fail --location --retry 3 "$UNIFONT_URL" -o /tmp/unifont.hex.gz \
+    && printf '%s  %s\n' "$UNIFONT_SHA256" /tmp/unifont.hex.gz | sha256sum -c - \
+    && gzip -dc /tmp/unifont.hex.gz > /opt/unifont.hex \
+    && rm /tmp/unifont.hex.gz \
+    && printf '%s  %s\n' "$UNIFONT_HEX_SHA256" /opt/unifont.hex | sha256sum -c -
+
 COPY .env /opt/inputs.env
 COPY build/native-deps.sh /work/build/native-deps.sh
 RUN sh /work/build/native-deps.sh
@@ -39,6 +52,8 @@ RUN python3 -B /work/tests/core_keys.py --source-hash > /opt/bitcoin-source.sha2
     && cmake -S /work -B /build -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel \
       -DCORE_SOURCE_DIR=/opt/bitcoin -DUR_SOURCE_DIR=/opt/bc-ur -DBIP39_WORDLIST=/opt/bip39-english.txt \
       -DBIP39_WORDLIST_SHA256="$BIP39_WORDLIST_SHA256" \
+      -DBIP39_CHINESE_WORDLIST=/opt/bip39-chinese.txt -DBIP39_CHINESE_WORDLIST_SHA256="$BIP39_CHINESE_WORDLIST_SHA256" \
+      -DUNIFONT_HEX=/opt/unifont.hex -DUNIFONT_HEX_SHA256="$UNIFONT_HEX_SHA256" \
     && cmake --build /build --parallel 2 \
     && python3 -B /work/tests/core_keys.py --source-hash > /tmp/source-after.sha256 \
     && cmp /opt/bitcoin-source.sha256 /tmp/source-after.sha256

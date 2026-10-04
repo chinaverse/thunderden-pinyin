@@ -22,6 +22,10 @@ inline void Require(bool condition, const char* message)
     if (!condition) throw std::invalid_argument(message);
 }
 unsigned MnemonicWordIndex(std::string_view word);
+unsigned ChineseWordIndex(std::string_view word);
+// A Chinese (Simplified) phrase becomes the English words at the same wordlist
+// indices; seeds always derive from the English text. ASCII input is copied as is.
+SecretBytes EnglishMnemonic(std::span<const unsigned char> mnemonic);
 void ValidateMnemonic(std::span<const unsigned char> mnemonic);
 SecretBytes MnemonicSeed(std::span<const unsigned char> mnemonic,
                          std::span<const unsigned char> passphrase);

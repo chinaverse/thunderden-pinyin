@@ -14,6 +14,9 @@ runtime libraries, Linux, BusyBox and GRUB.
 | Core's bundled libsecp256k1 | Elliptic-curve operations |
 | OpenSSL libcrypto | BIP39 PBKDF2 and constant-time comparison |
 | BIP39 English wordlist | Standard recovery-word data |
+| BIP39 Chinese (Simplified) wordlist | Chinese recovery words, mapped by index to English words |
+| `src/chinese_pinyin.txt` | Toneless pinyin for each Chinese word (generated with pypinyin 0.55.0); selects input candidates only |
+| GNU Unifont 16.0.04 (OFL-1.1) | 16x16 bitmaps of the 2048 Chinese words, compiled into the signer |
 | C/C++ runtime | Allocation, standard containers and operating-system interfaces |
 | bc-ur reference implementation | UR v2 Bytewords and fountain encoding/decoding |
 | ZBar 0.23.93 | QR recognition in grayscale camera images |

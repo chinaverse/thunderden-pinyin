@@ -1,4 +1,5 @@
 #include "keys.h"
+#include "chinese.h"
 #include "english.h"
 
 #include <base58.h>
@@ -26,6 +27,35 @@ unsigned MnemonicWordIndex(std::string_view word)
     const auto found = std::lower_bound(ENGLISH.begin(), ENGLISH.end(), word);
     Require(found != ENGLISH.end() && *found == word, "Invalid English recovery word");
     return static_cast<unsigned>(found - ENGLISH.begin());
+}
+
+unsigned ChineseWordIndex(std::string_view word)
+{
+    const auto found = std::find(CHINESE.begin(), CHINESE.end(), word);
+    Require(found != CHINESE.end(), "Invalid Chinese recovery word");
+    return static_cast<unsigned>(found - CHINESE.begin());
+}
+
+SecretBytes EnglishMnemonic(std::span<const unsigned char> mnemonic)
+{
+    Require(!mnemonic.empty() && mnemonic.size() <= 256, "Invalid mnemonic length");
+    if (std::all_of(mnemonic.begin(), mnemonic.end(), [](auto c) { return c < 0x80; })) {
+        return SecretBytes(mnemonic.begin(), mnemonic.end());
+    }
+    const std::string_view sentence(reinterpret_cast<const char*>(mnemonic.data()), mnemonic.size());
+    SecretBytes english;
+    english.reserve(256);
+    size_t start = 0;
+    while (true) {
+        const size_t end = sentence.find(' ', start);
+        const auto word = ENGLISH[ChineseWordIndex(sentence.substr(start, end == sentence.npos ? end : end - start))];
+        Require(english.size() + 1 + word.size() <= 256, "Invalid mnemonic length");
+        if (!english.empty()) english.push_back(' ');
+        english.insert(english.end(), word.begin(), word.end());
+        if (end == sentence.npos) break;
+        start = end + 1;
+    }
+    return english;
 }
 
 void ValidateMnemonic(std::span<const unsigned char> mnemonic)
@@ -58,12 +88,13 @@ void ValidateMnemonic(std::span<const unsigned char> mnemonic)
 SecretBytes MnemonicSeed(std::span<const unsigned char> mnemonic,
                          std::span<const unsigned char> passphrase)
 {
-    ValidateMnemonic(mnemonic);
+    const auto english = EnglishMnemonic(mnemonic);
+    ValidateMnemonic(english);
     Require(passphrase.size() <= 128, "Passphrase exceeds 128 characters");
     Require(std::all_of(passphrase.begin(), passphrase.end(), [](auto c) {
         return c >= 0x20 && c <= 0x7e;
     }), "Passphrase must contain printable ASCII only");
-    const std::string_view sentence(reinterpret_cast<const char*>(mnemonic.data()), mnemonic.size());
+    const std::string_view sentence(reinterpret_cast<const char*>(english.data()), english.size());
     constexpr std::string_view prefix = "mnemonic";
     SecretBytes salt(prefix.begin(), prefix.end()), seed(64);
     salt.insert(salt.end(), passphrase.begin(), passphrase.end());

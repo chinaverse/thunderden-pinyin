@@ -13,6 +13,11 @@ services:
         BITCOIN_SOURCE_SHA256: ${BITCOIN_SOURCE_SHA256:?Missing build pin}
         BIP39_WORDLIST_URL: ${BIP39_WORDLIST_URL:?Missing wordlist pin}
         BIP39_WORDLIST_SHA256: ${BIP39_WORDLIST_SHA256:?Missing wordlist pin}
+        BIP39_CHINESE_WORDLIST_URL: ${BIP39_CHINESE_WORDLIST_URL:?Missing wordlist pin}
+        BIP39_CHINESE_WORDLIST_SHA256: ${BIP39_CHINESE_WORDLIST_SHA256:?Missing wordlist pin}
+        UNIFONT_URL: ${UNIFONT_URL:?Missing font pin}
+        UNIFONT_SHA256: ${UNIFONT_SHA256:?Missing font pin}
+        UNIFONT_HEX_SHA256: ${UNIFONT_HEX_SHA256:?Missing font pin}
     user: "1000:1000"
     network_mode: none
     read_only: true
@@ -35,6 +40,11 @@ services:
         BITCOIN_SOURCE_SHA256: ${BITCOIN_SOURCE_SHA256:?Missing build pin}
         BIP39_WORDLIST_URL: ${BIP39_WORDLIST_URL:?Missing wordlist pin}
         BIP39_WORDLIST_SHA256: ${BIP39_WORDLIST_SHA256:?Missing wordlist pin}
+        BIP39_CHINESE_WORDLIST_URL: ${BIP39_CHINESE_WORDLIST_URL:?Missing wordlist pin}
+        BIP39_CHINESE_WORDLIST_SHA256: ${BIP39_CHINESE_WORDLIST_SHA256:?Missing wordlist pin}
+        UNIFONT_URL: ${UNIFONT_URL:?Missing font pin}
+        UNIFONT_SHA256: ${UNIFONT_SHA256:?Missing font pin}
+        UNIFONT_HEX_SHA256: ${UNIFONT_HEX_SHA256:?Missing font pin}
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     volumes:

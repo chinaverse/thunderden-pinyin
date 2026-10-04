@@ -56,6 +56,8 @@ USB on macOS, Linux or Windows; Apple Silicon Macs can write it but cannot boot 
 ## Features
 
 - English BIP39 recovery words with an optional printable ASCII passphrase.
+- Chinese (Simplified) BIP39 recovery words entered with pinyin; keys derive from
+  the equivalent English phrase.
 - Descriptor-based wallets, including SegWit and Taproot Miniscript.
 - BIP-388 wallet policies with seed-bound registration proofs.
 - BIP44, BIP49, BIP84 and BIP86 defaults without prior registration.

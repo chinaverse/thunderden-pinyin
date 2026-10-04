@@ -1,6 +1,7 @@
 #pragma once
 #include "review.h"
 #include <chrono>
+#include <functional>
 #include <termios.h>
 
 namespace td {
@@ -49,7 +50,9 @@ public:
         bool cancellable = true, std::string_view status = {});
     SecretBytes Input(std::string_view title, const ReviewLines& introduction, std::string_view prompt,
         size_t limit, SecretInput* secret = nullptr, SecretBytes initial = {}, std::string error = {}, bool warning = false);
-    SecretBytes Mnemonic();
+    // Framebuffer Chinese entry is injected so terminal-only programs do not link display code.
+    using ChineseInput = std::function<SecretBytes(Terminal&, size_t count)>;
+    SecretBytes Mnemonic(const ChineseInput& chinese = {});
     bool Approve(std::string_view title, const ReviewLines& lines, std::string_view confirmation, const ReviewLines& details = {},
         bool warning = false, std::string_view confirmation_note = {});
     bool Confirm(std::string_view title, const ReviewLines& lines, std::string_view action, const ReviewLines& details = {}, bool warning = false);

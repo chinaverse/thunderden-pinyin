@@ -31,6 +31,13 @@ are kept separate.
 ## Recovery input
 
 - English BIP39 wordlist; 12, 15, 18, 21 or 24 words with a valid checksum.
+- Chinese (Simplified) BIP39 words, chosen as the last word-count option. Each
+  word is typed as toneless pinyin (v for u-umlaut) and picked with 1-9 from the
+  matching characters, which the signer draws on the framebuffer with compiled-in
+  Unifont glyphs. Candidates are visible while choosing; chosen words show as `*`
+  until Tab. The phrase stays in Chinese until key derivation, which first replaces
+  each word with the English word at the same wordlist index. Keys therefore match
+  the English phrase, not wallets that run PBKDF2 over the Chinese text itself.
 - Choose the word count, then enter one lowercase word at a time. Words start
   hidden and are checked on Enter. Empty Enter does nothing. Up returns to the
   previous word while preserving the current draft; Backspace only edits the
@@ -46,8 +53,9 @@ are kept separate.
 - No mnemonic generation or persistent seed storage.
 - The initial console interface uses the kernel's default US keyboard layout.
 
-ASCII is unchanged by BIP39 NFKD normalization. Non-English mnemonics and
-non-ASCII passphrases are an explicit compatibility limitation.
+ASCII is unchanged by BIP39 NFKD normalization. Chinese words are translated
+to English before PBKDF2, so no normalization is needed. Other non-English
+mnemonics and non-ASCII passphrases are an explicit compatibility limitation.
 
 Recovery-word, passphrase and intermediate BIP39 seed buffers are zeroed before
 release after key derivation. The master private key, chain code and wallet-policy

@@ -138,7 +138,51 @@ void Display::Close()
     if (fd_ >= 0) close(fd_);
 }
 
-Display::~Display() { Close(); }
+Display::~Display()
+{
+    // Leave no recovery-word candidates or QR payloads in framebuffer memory.
+    if (memory_) Clear();
+    Close();
+}
+
+void Display::ClearRow(unsigned row)
+{
+    if (row >= Rows()) return;
+    for (unsigned y = row * font_height_; y < (row + 1) * font_height_; ++y)
+        for (unsigned x = 0; x < variable_.xres; ++x) Pixel(x, y, 25);
+}
+
+unsigned Display::Text(unsigned column, unsigned row, std::string_view text, uint8_t gray)
+{
+    const unsigned stride = (font_width_ + 7) / 8;
+    for (const char c : text) {
+        if (column >= Columns() || row >= Rows()) break;
+        const unsigned ch = static_cast<unsigned char>(c);
+        const auto* glyph = font_.data() + (ch < 128 ? ch : '?') * 64 * stride;
+        for (unsigned y = 0; y < font_height_; ++y) for (unsigned x = 0; x < font_width_; ++x) {
+            Pixel(column * font_width_ + x, row * font_height_ + y,
+                (glyph[y * stride + x / 8] & (0x80 >> (x % 8))) ? gray : 25);
+        }
+        ++column;
+    }
+    return column;
+}
+
+unsigned Display::Hanzi(unsigned column, unsigned row, std::span<const uint8_t, 32> glyph, uint8_t gray)
+{
+    if (column + 2 > Columns() || row >= Rows()) return column + 2;
+    const unsigned scale = std::max(1U, std::min(font_height_, 2 * font_width_) / 16);
+    const unsigned size = std::min(16 * scale, std::min(font_height_, 2 * font_width_));
+    const unsigned left = column * font_width_ + (2 * font_width_ - size) / 2;
+    const unsigned top = row * font_height_ + (font_height_ - size) / 2;
+    for (unsigned y = row * font_height_; y < (row + 1) * font_height_; ++y)
+        for (unsigned x = column * font_width_; x < (column + 2) * font_width_; ++x) Pixel(x, y, 25);
+    for (unsigned y = 0; y < size; ++y) for (unsigned x = 0; x < size; ++x) {
+        const unsigned gx = x / scale, gy = y / scale;
+        if (glyph[gy * 2 + gx / 8] & (0x80 >> (gx % 8))) Pixel(left + x, top + y, gray);
+    }
+    return column + 2;
+}
 
 void Display::Pixel(unsigned x, unsigned y, uint8_t gray)
 {
