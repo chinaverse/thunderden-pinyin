@@ -33,11 +33,13 @@ local approval.
 
 ## Two programs with separate responsibilities
 
-The application uses two Linux processes: running programs with separate memory.
+A QR scan uses two Linux processes: running programs with separate memory.
 
 - **Scanner (`thunderden-scanner`):** opens the camera, converts its images, reads
-  QR codes and assembles animated QR messages. It receives no recovery words or
-  private keys.
+  QR codes and assembles animated QR messages. It receives no existing signer
+  memory or private keys. When scanning a seed backup, it necessarily sees that
+  backup's recovery secret through the camera; isolation cannot hide scanned data
+  from the decoder itself.
 - **Signer (`thunderden-signer`):** holds the keys, validates wallet definitions
   and transactions, renders the review, accepts keyboard approval and signs.
 
@@ -87,10 +89,49 @@ The image's Linux kernel has networking disabled entirely. Landlock enforcement
 uses the kernel API directly. If the required protection is unavailable, the
 scanner refuses to scan.
 
-Only the scanner loads ZBar, libv4l and JPEG decoding libraries. Its executable
+Only the QR scanner loads ZBar. Camera workers load libv4l and its JPEG dependency;
+the entropy worker disables conversion and requests native sample formats. The QR scanner's executable
 contains no key-session, signing, keyboard or screen-rendering implementation.
 The image includes only the required BusyBox startup/shutdown helpers, and image
 checks reject executables that grant extra user or group privileges.
+
+## Entropy workers
+
+Experimental [recovery-word generation](ENTROPY.md) uses a fresh
+`thunderden-camera-entropy` process and a separate `thunderden-assess` process.
+They run before manual input or the final system-randomness request. Both have
+fresh address spaces, fixed environments, separate sessions and closed inherited
+keyboard/display descriptors. They cannot read the parent's memory, control its
+terminal or approve an action. All workers are killed if necessary and reaped
+before camera review, physical input or recovery-word display.
+
+The camera uses the existing 256 MiB virtual-address-space limit and zero file-size
+limit of the scanner policy. Its binary pipe has a BE32 kind and BE32 byte length:
+profile (17 bytes), frame count (4), samples (at most 65,536 per record), or
+completion flags (4). The parent validates the
+profile, bounds the complete sample stream to 64 MiB and requires complete
+records for its ten-second activity deadline. Capture has a separate 30-second
+watchdog through the camera worker's exit. Assessment has no application-imposed
+wall-clock or CPU deadline; the user can stop checks after valid capture.
+
+The assessment wrapper first checks two anonymous RAM-file descriptors. Input is
+sealed against writes, growth and shrinkage; the output is capped at 64 KiB.
+The official program can reopen `/proc/self/fd/3` and `/proc/self/fd/4`: Landlock
+retains anonymous-file descriptor access without allowing normal filesystem
+reads or adding a `/proc` exception. It receives only the camera prefix. The
+parent accepts a complete, finite, correctly sized overall result with coherent
+exit status; the upstream constant-alphabet failure is a distinct zero diagnostic.
+The input hash and full JSON stay off the screen and out of logs.
+
+Assessment limits are 512 MiB virtual address space, 64 open
+descriptors and zero additional processes/threads. OpenMP is fixed to one thread;
+the OS process limit enforces the boundary. This does not relax the QR scanner's
+limits. Inherited OS CPU limits are left unchanged. Failed, frozen, saturated or
+timed-out captures are discarded; the user can explicitly omit the optional source
+or start a new attempt. After complete, fault-free capture, stopping the checks
+offers a default skip or an explicit unchecked contribution. All workers are
+stopped and reaped before that choice. Partial statistics are never treated as a
+complete assessment.
 
 ## Scope and practical limits
 
@@ -121,17 +162,35 @@ validation work; current coverage is listed in [Implementation status](STATUS.md
   and zero width, height and payload size. The signer maps these codes to its own
   messages; decoder-provided text is never displayed.
   Nonblocking reads use a maximum 50 ms poll interval.
+- Plain address records are bounded to a 512-byte text payload plus CBOR framing.
+  The scanner preserves address case and returns an untrusted proposal; the signer
+  separately checks URI syntax, the Bitcoin destination and public script matches.
+  Address searching runs after the camera worker has exited and can be stopped
+  between public derivations. It does not call signing operations.
+- Seed records use kind 7 (48/96 numeric bytes) or 8 (16/32 binary bytes), with
+  zero geometry/progress and no CBOR wrapping. They enter wiping buffers and are
+  independently decoded by the signer after worker exit. Loading requires local
+  confirmation and the normal passphrase flow; scanning another seed never
+  replaces the active session automatically. See [seed QR backups](SEED_QR.md).
 - Per-scanner resource limits are 256 MiB of address space, 64 file descriptors
-  and no additional child processes or threads. A parent-side ten-second
-  no-frame deadline covers startup and stalled capture/decoding.
+  and no additional child processes or threads. A hard zero `RLIMIT_FSIZE` prevents
+  regular-file growth, including anonymous RAM files (`memfd`), while pipe output
+  remains available. This closes the demonstrated anonymous-file backing-store
+  bypass of `RLIMIT_AS`; it is not comprehensive kernel-memory accounting.
+  The separate assessment policy retains its 64 KiB file-size limit for reports.
+  A parent-side ten-second no-frame deadline covers startup and stalled
+  capture/decoding.
 - [Isolation tests](../tests/isolation.cpp) check fresh process state, restricted
   privileges, denied application-file writes, real JPEG/QR/UR decoding under
   confinement, malformed and partial pipe records, cancellation, process cleanup,
-  memory limits, no-frame timeouts, fixed failure reports and denied filesystem
+  address-space limits, denied anonymous-file growth and file-limit increases,
+  no-frame timeouts, fixed failure reports and denied filesystem
   and parent-process access. JPEG conversion uses the real conversion libraries
   with mocked camera-driver controls.
 - [Build and tests](BUILD.md) describes the default native suites and optional
-  checks on the image's own kernel and libraries. Host containment tests report
-  a skip when Landlock ABI 6 is unavailable. Guest checks use a separate test-only
+  checks on the image's own kernel and libraries. The full host suite requires
+  usable Landlock ABI 6. Only `isolation` reports a skip when that ABI is absent;
+  entropy confinement/assessment and their terminal cases fail. Production workers
+  always fail closed. Guest checks use a separate test-only
   overlay; development tools and test executables are kept outside the installed
   signer image.

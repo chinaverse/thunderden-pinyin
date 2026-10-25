@@ -15,7 +15,7 @@ namespace td {
 namespace {
 static_assert(std::endian::native == std::endian::little);
 // Five uint32s: kind, width, height, progress, payload length.
-constexpr uint32_t PREVIEW = 1, PSBT = 2, REQUEST = 3, FAILURE = 4, WALLET = 5;
+constexpr uint32_t PREVIEW = 1, PSBT = 2, REQUEST = 3, FAILURE = 4, WALLET = 5, ADDRESS = 6, SEED = 7, COMPACT_SEED = 8;
 void Write(std::span<const uint8_t> bytes)
 {
     while (!bytes.empty()) {
@@ -109,16 +109,19 @@ std::optional<ScanUpdate> ScanProcess::Poll()
             case ScanFailure::Confinement: throw std::invalid_argument("Scanner isolation setup failed");
             case ScanFailure::Capture: throw std::invalid_argument("Camera frame capture failed; retry the scan");
             case ScanFailure::Decode: throw std::invalid_argument("QR image decoding failed");
-            case ScanFailure::Request: throw std::invalid_argument("Invalid or unsupported UR v2 request");
+            case ScanFailure::Request: throw std::invalid_argument("Invalid or unsupported QR data");
             }
             throw std::invalid_argument("Invalid scanner failure code");
         }
         if (kind == PREVIEW) {
             Require(width > 0 && width <= 1920 && height > 0 && height <= 1080
                 && size == width * height && progress <= 100, "Invalid scanner preview");
+        } else if (kind == SEED || kind == COMPACT_SEED) {
+            Require(width == 0 && height == 0 && progress == 0 && (kind == SEED
+                ? size == 48 || size == 96 : size == 16 || size == 32), "Invalid scanner seed result");
         } else {
-            Require((kind == PSBT || kind == REQUEST || kind == WALLET) && width == 0 && height == 0 && progress == 0
-                && size > 0 && size <= (kind == WALLET ? MAX_WALLET_SETUP : MAX_UR_MESSAGE), "Invalid scanner result");
+            Require((kind == PSBT || kind == REQUEST || kind == WALLET || kind == ADDRESS) && width == 0 && height == 0 && progress == 0
+                && size > 0 && size <= (kind == ADDRESS ? MAX_ADDRESS_QR + 9 : kind == WALLET ? MAX_WALLET_SETUP : MAX_UR_MESSAGE), "Invalid scanner result");
         }
         payload_.resize(size);
         checked_ = true;
@@ -129,8 +132,16 @@ std::optional<ScanUpdate> ScanProcess::Poll()
         update = {width, height, progress, std::move(payload_), {}};
         preview_seen_ = true;
         deadline_ = std::chrono::steady_clock::now() + SCAN_FRAME_TIMEOUT;
+    } else if (kind == SEED || kind == COMPACT_SEED) {
+        update.message = QRMessage{kind == SEED ? "seedqr" : "compact-seedqr", {}, {payload_.begin(), payload_.end()}};
+        // Release the pipe buffer now, rather than leave a second seed copy until
+        // this scanner object is destroyed.
+        ScanBytes{}.swap(payload_);
+        complete_ = true;
     } else {
-        update.message = QRMessage{kind == PSBT ? "crypto-psbt" : kind == WALLET ? "crypto-output" : "bytes", std::move(payload_)};
+        update.message = QRMessage{kind == PSBT ? "crypto-psbt" : kind == WALLET ? "crypto-output" : kind == ADDRESS ? "address" : "bytes",
+            {payload_.begin(), payload_.end()}};
+        ScanBytes{}.swap(payload_);
         complete_ = true;
     }
     header_bytes_ = payload_bytes_ = 0;
@@ -145,8 +156,15 @@ void SendPreview(std::span<const uint8_t> gray, unsigned width, unsigned height,
 
 void SendScanResult(const QRMessage& message)
 {
-    Require(message.type == "crypto-psbt" || message.type == "bytes" || message.type == "crypto-output", "Unsupported scanner result");
-    const auto kind = message.type == "crypto-psbt" ? PSBT : message.type == "crypto-output" ? WALLET : REQUEST;
+    if (message.type == "seedqr" || message.type == "compact-seedqr") {
+        Require(message.cbor.empty() && (message.type == "seedqr"
+            ? message.secret.size() == 48 || message.secret.size() == 96 : message.secret.size() == 16 || message.secret.size() == 32),
+            "Invalid scanner seed result");
+        Send({message.type == "seedqr" ? SEED : COMPACT_SEED, 0, 0, 0, static_cast<uint32_t>(message.secret.size())}, message.secret);
+        return;
+    }
+    Require(message.type == "crypto-psbt" || message.type == "bytes" || message.type == "crypto-output" || message.type == "address", "Unsupported scanner result");
+    const auto kind = message.type == "crypto-psbt" ? PSBT : message.type == "crypto-output" ? WALLET : message.type == "address" ? ADDRESS : REQUEST;
     Send({kind, 0, 0, 0, static_cast<uint32_t>(message.cbor.size())}, message.cbor);
 }
 

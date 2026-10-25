@@ -50,7 +50,9 @@ are kept separate.
 - An empty passphrase needs one Enter. A non-empty passphrase must be entered twice;
   a mismatch lets you retry without re-entering the recovery words.
 - The mnemonic is entered when first needed. Derived keys remain in RAM for the session.
-- No mnemonic generation or persistent seed storage.
+- No persistent seed storage. This experimental branch also supports
+  [12/24-word generation](ENTROPY.md): mandatory Core strong randomness, optional
+  camera and physical contributions, and complete backup re-entry before key use.
 - The initial console interface uses the kernel's default US keyboard layout.
 
 ASCII is unchanged by BIP39 NFKD normalization. Chinese words are translated
@@ -211,13 +213,13 @@ inputs. A single-input SegWit-v0 spend can use compact data safely against this 
 attack: a wrong amount makes its signature invalid. Taproot DEFAULT likewise
 protects all amounts, including in a mixed-input transaction.
 
-An unverified-fee request requires an explicit red warning confirmation followed
-by the normal review and typed `SIGN`. The warning is not an error notice: Esc
-cancels, and navigation alone does not accept the last warning page. The red
-heading and qualified fee/input totals persist through Details, final confirmation
-and revisiting the reply. Accepting the warning does not authenticate the missing
-amounts or stop the known multi-input fee attack. [Fee guidance](FEES.md) explains
-the tradeoff in plain English.
+`ReviewedTransaction::Sign` rejects an unverified-fee request before invoking the
+approval callback or deriving private signing keys. This applies to direct PSBT
+and command-format requests. The interactive flow shows an error linking to
+Sparrow troubleshooting; there is no override. Single-input SegWit (including
+multisig), sufficiently binding Taproot signatures and other requests whose
+missing amounts are covered by every signature remain supported.
+[Fee guidance](FEES.md) explains the policy in plain English.
 
 Derivation hints propose address positions; only an exact match against the
 authorized policy's derived script establishes ownership. Receive/self-payment
@@ -250,11 +252,18 @@ an unfinished external input or unsatisfied script prevents dummy finalization.
 
 The mandatory signing review shows wallet/network, every non-change destination's
 full address or script and amount, the fee with its assurance, a fee-rate estimate when
-available, and verified change totals/counts. Receive/self-payments remain visible.
-Only independently verified change addresses move to Details. With unrecognized
+available, each verified change output's amount and address index, and change
+totals/counts. Receive/self-payments remain visible. Change indices above 50,000
+also show the full address or script and warn that wallet recovery may not find
+the change automatically. The red warning heading persists in Details and
+completed review; the signing confirmation also states the recovery risk. This
+threshold is a disclosure heuristic, not a derivation limit or a guarantee that
+lower indices will be discovered: a stateless signer does not know the wallet's
+last-used index or gap limit. Spending existing high-index inputs remains supported.
+Ordinary verified change addresses remain in Details. With unrecognized
 inputs, wallet accounting is explicitly limited to verified inputs/outputs rather
 than claiming an exact wallet decrease. Active absolute and relative lock conditions
-are disclosed without claiming chain maturity. Input records, individual change
+are disclosed without claiming chain maturity. Input records, full change
 addresses, raw transaction fields and wallet-policy identity remain in Details.
 
 `Sign` invokes a local approval callback with these facts. Rejection returns no
@@ -312,12 +321,13 @@ comes from the renderer; wallet-provided text is still printable ASCII only.
 Menus, inputs and reviews prepare their body rows using their own layout.
 The renderer draws those rows without rewrapping them or starting another
 interactive screen. Text validation is separate from wrapping.
-Long menu labels wrap within their numbered option on narrow screens. The main
-menu's orange loaded-wallet status uses the otherwise blank header row, so it
-remains visible even when the options scroll. An overlong status is visibly
-shortened with an ellipsis; the complete wallet definition stays in the review.
+Long menu labels wrap within their numbered option on narrow screens. The active
+menu pins its seed fingerprint and optional loaded-wallet identity above the
+choices, with a blank row separating the title and fingerprint. Identity remains
+visible when compact screens scroll the options; the network stays top-right.
 
-GRUB uses the firmware's automatic graphics mode. Before loading keys or dropping
+Legacy BIOS GRUB uses the firmware's automatic graphics mode; UEFI boots the
+self-contained EFI kernel directly. Before loading keys or dropping
 privileges, the signer selects a built-in Terminus font when the screen is large
 enough, with the compact VGA font as a fallback. High-DPI screens use an exact
 2x enlargement of the larger bitmap. Font and palette setup are optional visual
@@ -334,7 +344,17 @@ key. This is a cosigner export, not a complete multisig configuration. It uses
 the deployed legacy registry tags and shares the HD-key encoder with modern
 `hdkey` exports.
 
-The main menu has three actions: scan a QR, share a public key and end the session.
+Before loading keys, the start menu offers scanning a seed QR, entering recovery
+words or creating a new wallet. Both typed and scanned imports have a local review
+before the normal optional-passphrase flow. S optionally shows the private words
+and seed QR without changing them; Enter/Esc returns to the review, while ordinary
+Continue never displays the backup. Words are not retained in the active session
+for later export. The active menu then has three actions: scan a
+QR, share a public key and end the session. A subsequent seed scan offers keeping
+the session (default) or ending the signer process and rescanning in a fresh
+session; no in-place replacement or persistent secret handoff is used.
+The [seed QR guide](SEED_QR.md) describes formats, private backup display and
+the untagged CompactSeedQR detection limitation.
 There is no standalone descriptor export. Sparrow can assemble both single-key
 and multisig wallets from account-key QRs, and Liana retrieves keys through its
 commands. Descriptors remain the internal wallet model and are visible in policy
@@ -398,6 +418,35 @@ Linux and hardware remain trust dependencies. The isolation guide explains the
 threat model, enforced boundary and practical limits.
 
 ## Build and independent review
+
+### Authenticated UEFI boot
+
+The EFI executable is the Linux `bzImage`, including the complete built-in
+initramfs. A release signature therefore authenticates the kernel, signer,
+libraries, workers and startup configuration together. UEFI does not execute GRUB
+or read its configuration. `CONFIG_CMDLINE_OVERRIDE` fixes the kernel command
+line; its built-in `noinitrd` is parsed by the EFI stub before either external
+initrd loader. Runtime networking/storage/module restrictions remain unchanged.
+Legacy BIOS retains its separate, unauthenticated GRUB path, which loads the same
+`/EFI/BOOT/BOOTX64.EFI` file through the Linux boot protocol. It does not verify
+the EFI signature; direct UEFI authentication is unchanged.
+
+Image format 2 stores one shared EFI/BIOS kernel payload instead of two copies.
+Current tools accept only that format; earlier releases retain their tagged tools.
+Unsigned images remain deterministic, and preparation explicitly rejects EFI
+payloads with an existing certificate table rather than comparing duplicate files.
+Public-only post-processing verifies a detached EFI signature against an explicit
+certificate fingerprint and deterministically assembles the signed image. It can
+reconstruct and compare the entire signed disk byte-for-byte, without a private
+key or arbitrary patch instructions. The signature does not authenticate unused
+disk space or partition/FAT metadata to the firmware.
+
+Private-key creation and signing are human-operated, outside build containers.
+Firmware ownership remains with the user; trusting a developer certificate in
+`db` is distinct from replacing `PK`/`KEK`. No rollback, compromised-firmware or
+legacy-BIOS authentication guarantee is made. See [operation and limits](SECURE_BOOT.md).
+
+### Code boundaries
 
 The main code boundaries are deliberately small:
 

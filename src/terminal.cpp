@@ -187,18 +187,26 @@ void Terminal::Screen(std::string_view title, const ReviewLines& lines, std::str
 }
 
 int Terminal::Menu(std::string_view title, const ReviewLines& choices, std::string_view introduction,
-    bool cancellable, std::string_view status)
+    bool cancellable, std::string_view status, bool keep_introduction, const ReviewLines& details, const ReviewLines& identity)
 {
     Require(!choices.empty() && choices.size() <= 9, "Invalid menu");
     Printable(status);
     size_t selected = 0, first = 0, previous_highlight = 0, previous_count = 0;
     std::optional<Layout> previous_view;
     ReviewLines previous_lines;
+    bool redraw = false;
     Flush();
     while (true) {
         const auto view = View();
-        const auto instruction = Wrap({"Use the arrow keys to choose, then press Enter."}, view.width);
-        const size_t available = view.height - instruction.size() - 1;
+        auto pinned = Wrap(identity, view.width);
+        auto instruction = Wrap({"Use the arrow keys to choose, then press Enter."}, view.width);
+        // Session identity stays visible even when a compact screen scrolls choices.
+        // The footer already explains navigation, so omit its duplicate if needed.
+        if (!pinned.empty() && pinned.size() + instruction.size() + 3 > view.height) instruction.clear();
+        if (!pinned.empty() && pinned.size() + (instruction.empty() ? 1 : instruction.size() + 2) < view.height) pinned.emplace_back("");
+        const size_t reserved = pinned.size() + (instruction.empty() ? 0 : instruction.size() + 1);
+        Require(reserved < view.height, "Session identity does not fit this screen");
+        const size_t available = view.height - reserved;
         std::vector<ReviewLines> entries;
         size_t entry_rows = 0;
         for (const auto& choice : choices) {
@@ -206,8 +214,19 @@ int Terminal::Menu(std::string_view title, const ReviewLines& choices, std::stri
             entry_rows += entries.back().size();
         }
         auto lines = introduction.empty() ? ReviewLines{} : Wrap({std::string(introduction), ""}, view.width);
-        if (lines.size() + entry_rows > available) lines.clear();
-        const size_t start = lines.size(), slots = available - start;
+        if (lines.size() + entry_rows > available) {
+            // Required context is paged once on compact screens, never silently lost.
+            if (keep_introduction && !previous_view) {
+                ReviewLines context;
+                if (!status.empty()) context = {std::string(status), ""};
+                context.push_back(std::string(introduction));
+                while (!Pages(title, context, "choose what to do next", {}, PageMode::Review))
+                    if (cancellable) throw Cancelled{};
+            }
+            lines.clear();
+        }
+        const size_t slots = available - lines.size();
+        lines.insert(lines.begin(), pinned.begin(), pinned.end());
         Require(entries[selected].size() <= slots, "Menu option does not fit this screen");
         if (!previous_view || *previous_view != view) first = 0;
         if (selected < first) first = selected;
@@ -216,16 +235,16 @@ int Terminal::Menu(std::string_view title, const ReviewLines& choices, std::stri
         while (visible > slots) visible -= entries[first++].size();
         size_t highlight = 0;
         for (size_t i = first; i < choices.size(); ++i) {
-            if (lines.size() + entries[i].size() > available) break;
+            if (lines.size() + entries[i].size() > pinned.size() + available) break;
             if (i == selected) highlight = lines.size();
             for (size_t row = 0; row < entries[i].size(); ++row)
                 lines.push_back((row ? std::string(5, ' ') : std::string(i == selected ? "> " : "  ") + std::to_string(i + 1) + ": ")
                     + entries[i][row]);
         }
-        lines.emplace_back(""); lines.insert(lines.end(), instruction.begin(), instruction.end());
-        if (!previous_view || *previous_view != view) {
+        if (!instruction.empty()) { lines.emplace_back(""); lines.insert(lines.end(), instruction.begin(), instruction.end()); }
+        if (redraw || !previous_view || *previous_view != view) {
             Draw(view, title, lines, std::string("Up/Down: Choose   Enter/1-") + std::to_string(choices.size())
-                + ": Select" + (cancellable ? "   Esc: Back" : ""), highlight);
+                + ": Select" + (details.empty() ? "" : "   d: Details") + (cancellable ? "   Esc: Back" : ""), highlight);
             // Status occupies the otherwise blank header row, so it is not
             // discarded when a small screen needs to scroll the menu options.
             if (!status.empty()) {
@@ -244,17 +263,23 @@ int Terminal::Menu(std::string_view title, const ReviewLines& choices, std::stri
             }
         }
         previous_view = view; previous_lines = lines; previous_highlight = highlight; previous_count = entries[selected].size();
+        redraw = false;
         const int key = Key();
         if ((key == 27 || key == 3) && cancellable) throw Cancelled{};
         if (key == KEY_UP && selected) --selected;
         if (key == KEY_DOWN && selected + 1 < choices.size()) ++selected;
         if (key == '\r' || key == '\n') return selected;
         if (key >= '1' && size_t(key - '1') < choices.size()) return key - '1';
+        if ((key == 'd' || key == 'D') && !details.empty()) {
+            if (!Pages(title, details, "return to choices", {}, PageMode::Review) && cancellable) throw Cancelled{};
+            redraw = true;
+            Flush();
+        }
     }
 }
 
 SecretBytes Terminal::Input(std::string_view title, const ReviewLines& introduction, std::string_view prompt,
-    size_t limit, SecretInput* secret, SecretBytes result, std::string error, bool warning)
+    size_t limit, SecretInput* secret, SecretBytes result, std::string error, bool warning, std::string_view help)
 {
     const auto view = View();
     Printable(prompt);
@@ -265,7 +290,7 @@ SecretBytes Terminal::Input(std::string_view title, const ReviewLines& introduct
     result.reserve(limit);
     const bool word = secret && secret->word_number;
     if (secret) secret->previous = false;
-    const auto hidden_hint = !secret ? ReviewLines{} : Wrap({word
+    const auto hidden_hint = !secret ? (help.empty() ? ReviewLines{} : Wrap({std::string(help)}, view.width)) : Wrap({word
         ? "Your words are hidden as you type." : "Your passphrase is hidden as you type.", word
         ? "Press TAB if you want to see the word you are entering."
         : "Press TAB if you want to see what you are entering."}, view.width);
@@ -276,14 +301,17 @@ SecretBytes Terminal::Input(std::string_view title, const ReviewLines& introduct
     size_t hint_row{}, input_row{}, overflow{};
     const auto erase = [&]() { At(input_row, view.left); Write("\033[2K\033[?25l"); };
     const auto draw = [&]() {
-        auto text = Wrap(error.empty() ? introduction : ReviewLines{error}, view.width);
-        if (hint_rows + (secret && !text.empty() ? 1 : 0) + text.size() + 2 > view.height) {
-            if (!Pages(title, error.empty() ? introduction : ReviewLines{error}, "continue", {},
+        auto context = error.empty() ? introduction : ReviewLines{error};
+        // Invalid consent must not hide the risk warning, including on overflow.
+        if (!error.empty() && warning) context.insert(context.end(), introduction.begin(), introduction.end());
+        auto text = Wrap(context, view.width);
+        if (hint_rows + (hint_rows && !text.empty() ? 1 : 0) + text.size() + 2 > view.height) {
+            if (!Pages(title, context, "continue", {},
                 error.empty() ? PageMode::Review : PageMode::Error, warning)) throw Cancelled{};
             text.clear();
         }
         auto lines = text;
-        if (!text.empty() && secret) lines.emplace_back("");
+        if (!text.empty() && hint_rows) lines.emplace_back("");
         hint_row = lines.size();
         const auto& hint = secret && secret->visible ? visible_hint : hidden_hint;
         lines.insert(lines.end(), hint.begin(), hint.end());
@@ -348,22 +376,24 @@ SecretBytes Terminal::Input(std::string_view title, const ReviewLines& introduct
     }
 }
 
-SecretBytes Terminal::Mnemonic(const ChineseInput& chinese)
+SecretBytes Terminal::Mnemonic(unsigned count, const ChineseInput& chinese)
 {
-    const ReviewLines sizes{"12 words", "15 words", "18 words", "21 words", "24 words"};
-    auto choices = sizes;
-    if (chinese) choices.push_back("Chinese words (pinyin input)");
-    const int choice = Menu("Your recovery phrase", choices, "How many words are in your wallet backup?");
-    if (chinese && choice == 5) {
-        Notice("Chinese recovery words", {"Use this for a backup written with the BIP39 Chinese (Simplified) wordlist.", "",
-            "Thunder Den keeps the words in Chinese while you enter them. Before creating keys, it replaces each "
-            "Chinese word with the English BIP39 word at the same list position.", "",
-            "Keys therefore match the English version of your phrase. Wallets that create keys from the Chinese "
-            "text itself give a different wallet; check that the fingerprint matches your wallet app."});
-        const size_t count = 12 + 3 * Menu("Your Chinese recovery phrase", sizes, "How many words are in your wallet backup?");
-        return chinese(*this, count);
+    if (!count) {
+        const ReviewLines sizes{"12 words", "15 words", "18 words", "21 words", "24 words"};
+        auto choices = sizes;
+        if (chinese) choices.push_back("Chinese words (pinyin input)");
+        const int choice = Menu("Your recovery phrase", choices, "How many words are in your wallet backup?");
+        if (chinese && choice == 5) {
+            Notice("Chinese recovery words", {"Use this for a backup written with the BIP39 Chinese (Simplified) wordlist.", "",
+                "Thunder Den keeps the words in Chinese while you enter them. Before creating keys, it replaces each "
+                "Chinese word with the English BIP39 word at the same list position.", "",
+                "Keys therefore match the English version of your phrase. Wallets that create keys from the Chinese "
+                "text itself give a different wallet; check that the fingerprint matches your wallet app."});
+            return chinese(*this, 12 + 3 * Menu("Your Chinese recovery phrase", sizes, "How many words are in your wallet backup?"));
+        }
+        count = 12 + 3 * choice;
     }
-    const size_t count = 12 + 3 * choice;
+    Require(count >= 12 && count <= 24 && count % 3 == 0, "Invalid recovery word count");
     SecretInput visibility;
     std::string error;
     while (true) {
@@ -394,7 +424,8 @@ SecretBytes Terminal::Mnemonic(const ChineseInput& chinese)
 }
 
 bool Terminal::Pages(std::string_view title, const ReviewLines& lines, std::string_view action,
-    const ReviewLines& details, PageMode mode, bool warning)
+    const ReviewLines& details, PageMode mode, bool warning, std::string_view summary_prompt,
+    const std::function<void()>& show_backup, std::string_view show_label)
 {
     const auto view = View();
     const auto wrapped = Wrap(lines, view.width);
@@ -409,8 +440,9 @@ bool Terminal::Pages(std::string_view title, const ReviewLines& lines, std::stri
     }
     const auto next = Wrap({"Press Enter to read the next page."}, view.width);
     const auto finish = Wrap({"Press Enter to " + std::string(action) + "."}, view.width);
+    const auto summary_finish = summary_prompt.empty() ? finish : Wrap({std::string(summary_prompt)}, view.width);
     const auto return_to_review = Wrap({"Press Enter to return to the review."}, view.width);
-    const size_t reserved = std::max({next.size(), finish.size(), separate ? return_to_review.size() : size_t{0}}) + 1;
+    const size_t reserved = std::max({next.size(), finish.size(), summary_finish.size(), separate ? return_to_review.size() : size_t{0}}) + 1;
     Require(view.height > reserved, "Not enough room for this review");
     const size_t height = view.height - reserved;
     size_t page_by_view[2]{};
@@ -426,10 +458,11 @@ bool Terminal::Pages(std::string_view title, const ReviewLines& lines, std::stri
         const bool last = page + 1 == pages;
         const bool inspecting = detailed && separate;
         visible.emplace_back("");
-        const auto& instruction = last ? (inspecting ? return_to_review : finish) : next;
+        const auto& instruction = last ? (inspecting ? return_to_review : detailed ? finish : summary_finish) : next;
         visible.insert(visible.end(), instruction.begin(), instruction.end());
         const std::string pager = pages > 1 ? "Page " + std::to_string(page + 1) + "/" + std::to_string(pages) : "";
         std::string footer = (last ? "Enter: " + (inspecting ? std::string("Return to review") : std::string(action)) : "Right/n/Enter: Next")
+            + (last && show_backup ? "  " + std::string(show_label) : "")
             + (page ? "  Left/b: Back" : "") + (details.empty() ? "" : detailed ? "  d: Summary" : "  d: Details")
             + (mode == PageMode::Idle ? "" : mode == PageMode::Completed ? "  Esc: Finish" : "  Esc: Cancel");
         Flush();
@@ -441,7 +474,11 @@ bool Terminal::Pages(std::string_view title, const ReviewLines& lines, std::stri
         if (mode == PageMode::Idle) {
             if (key == 4) return false; // EOF stops the launcher rather than starting a session.
         } else if (key == 27 || key == 3 || key == 'q') return false;
-        if (key == 'd' && !details.empty()) { detailed = !detailed; continue; }
+        if (last && show_backup && (key == 's' || key == 'S')) {
+            show_backup();
+            continue; // Repaint the same public page, clearing the private view.
+        }
+        if ((key == 'd' || key == 'D') && !details.empty()) { detailed = !detailed; continue; }
         if ((key == 'b' || key == KEY_LEFT) && page) --page;
         if (key == 'n' || key == KEY_RIGHT || key == '\r' || key == '\n') {
             if (!last) ++page;
@@ -458,12 +495,21 @@ bool Terminal::Approve(std::string_view title, const ReviewLines& lines, std::st
 {
     if (!Pages(title, lines, "continue", details, PageMode::Review, warning)) return false;
     try {
-        const auto answer = Input(title, {"You have reached the end of this review.",
-            confirmation_note.empty() ? warning ? "The fee uses unverified input amounts. Confirm only if you accept this risk."
-                : "Confirm only if the details match what you intended." : std::string(confirmation_note)},
-            "Type " + std::string(confirmation) + " then Enter: ", 32,
-            nullptr, {}, {}, warning);
-        return std::string_view(reinterpret_cast<const char*>(answer.data()), answer.size()) == confirmation;
+        std::string error;
+        while (true) {
+            const auto answer = Input(title, {"Case and outer spaces are ignored.",
+                confirmation_note.empty() ? "Confirm only if the details match." : std::string(confirmation_note)},
+                "Type " + std::string(confirmation) + " then Enter: ", 32,
+                nullptr, {}, error, warning);
+            std::string_view text(reinterpret_cast<const char*>(answer.data()), answer.size());
+            const auto first = text.find_first_not_of(' ');
+            text = first == text.npos ? std::string_view{} : text.substr(first, text.find_last_not_of(' ') - first + 1);
+            const auto upper = [](unsigned char c) { return c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c; };
+            if (std::equal(text.begin(), text.end(), confirmation.begin(), confirmation.end(),
+                [&](auto a, auto b) { return upper(a) == upper(b); })) return true;
+            error = confirmation == "SIGN" ? "Not confirmed. Nothing signed." : "Not confirmed. Nothing approved.";
+            if (!warning && !confirmation_note.empty()) error += " " + std::string(confirmation_note);
+        }
     } catch (const Cancelled&) { return false; }
 }
 
@@ -472,9 +518,10 @@ void Terminal::Notice(std::string_view title, const ReviewLines& lines)
     Pages(title, lines, "continue", {}, PageMode::Error);
 }
 
-bool Terminal::Confirm(std::string_view title, const ReviewLines& lines, std::string_view action, const ReviewLines& details, bool warning)
+bool Terminal::Confirm(std::string_view title, const ReviewLines& lines, std::string_view action, const ReviewLines& details,
+    bool warning, std::string_view summary_prompt)
 {
-    return Pages(title, lines, action, details, PageMode::Confirm, warning);
+    return Pages(title, lines, action, details, PageMode::Confirm, warning, summary_prompt);
 }
 
 bool Terminal::Revisit(const ReviewScreen& review)

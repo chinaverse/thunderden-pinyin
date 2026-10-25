@@ -1,13 +1,16 @@
 #include "camera.h"
 #include "transport.h"
+#include "camera_entropy.h"
 
 #include <libv4l2.h>
 #include <linux/videodev2.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
-#include <memory>
 #include <stdexcept>
 #include <system_error>
 
@@ -32,12 +35,26 @@ std::vector<uint8_t> Grayscale(std::span<const uint8_t> frame, unsigned width,
     return result;
 }
 
-Camera::Camera()
+Camera::Camera(bool native) : native_(native)
 {
+    const auto usable = [native](const v4l2_pix_format& pix) {
+        const bool yuyv = pix.pixelformat == V4L2_PIX_FMT_YUYV || (native && pix.pixelformat == V4L2_PIX_FMT_UYVY);
+        const bool grey = native && pix.pixelformat == V4L2_PIX_FMT_GREY;
+        const size_t channels = grey ? 1 : yuyv ? 2 : 3;
+        const size_t stride = std::max<size_t>(pix.bytesperline, pix.width * channels);
+        return pix.width && pix.width <= (native ? 640U : 1920U) && pix.height && pix.height <= (native ? 480U : 1080U)
+            && (!yuyv || pix.width % 2 == 0)
+            && (yuyv || grey || pix.pixelformat == V4L2_PIX_FMT_RGB24 || pix.pixelformat == V4L2_PIX_FMT_BGR24)
+            && stride <= 16 * 1024 * 1024 / pix.height && pix.sizeimage <= 16 * 1024 * 1024;
+    };
     bool denied = false;
     for (unsigned index = 0; index < 32; ++index) {
         const auto path = "/dev/video" + std::to_string(index);
-        const int fd = v4l2_open(path.c_str(), O_RDWR | O_CLOEXEC);
+        int fd;
+        if (native) {
+            fd = open(path.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
+            if (fd >= 0 && v4l2_fd_open(fd, V4L2_DISABLE_CONVERSION) < 0) { close(fd); fd = -1; }
+        } else fd = v4l2_open(path.c_str(), O_RDWR | O_CLOEXEC);
         if (fd < 0) {
             denied |= errno == EACCES || errno == EPERM;
             continue;
@@ -49,40 +66,103 @@ Camera::Camera()
         format.fmt.pix.height = 480;
         format.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB24;
         format.fmt.pix.field = V4L2_FIELD_ANY;
-        if (v4l2_ioctl(fd, VIDIOC_QUERYCAP, &cap) != 0
-            || !((cap.capabilities & V4L2_CAP_DEVICE_CAPS ? cap.device_caps : cap.capabilities) & V4L2_CAP_VIDEO_CAPTURE)
-            || v4l2_ioctl(fd, VIDIOC_S_FMT, &format) != 0) {
+        bool configured = v4l2_ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0
+            && ((cap.capabilities & V4L2_CAP_DEVICE_CAPS ? cap.device_caps : cap.capabilities) & V4L2_CAP_VIDEO_CAPTURE);
+        if (native) configured = configured
+            && ((cap.capabilities & V4L2_CAP_DEVICE_CAPS ? cap.device_caps : cap.capabilities) & V4L2_CAP_STREAMING);
+        if (configured && native) {
+            configured = false;
+            for (auto preferred : {V4L2_PIX_FMT_GREY, V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_UYVY, V4L2_PIX_FMT_RGB24, V4L2_PIX_FMT_BGR24}) {
+                for (unsigned n = 0; n < 64 && !configured; ++n) {
+                    v4l2_fmtdesc available{}; available.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; available.index = n;
+                    if (v4l2_ioctl(fd, VIDIOC_ENUM_FMT, &available) < 0) break;
+                    if (available.pixelformat != preferred || (available.flags & V4L2_FMT_FLAG_EMULATED)) continue;
+                    format = {}; format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; format.fmt.pix.field = V4L2_FIELD_ANY;
+                    format.fmt.pix.width = 640; format.fmt.pix.height = 480; format.fmt.pix.pixelformat = preferred;
+                    configured = v4l2_ioctl(fd, VIDIOC_S_FMT, &format) == 0 && format.fmt.pix.pixelformat == preferred
+                        && usable(format.fmt.pix);
+                }
+                if (configured) break;
+            }
+        } else if (configured) configured = v4l2_ioctl(fd, VIDIOC_S_FMT, &format) == 0;
+        if (!configured || !usable(format.fmt.pix)) {
             v4l2_close(fd);
             continue;
         }
         const auto& pix = format.fmt.pix;
-        const bool yuyv = pix.pixelformat == V4L2_PIX_FMT_YUYV;
-        const size_t channels = yuyv ? 2 : 3;
+        const bool yuyv = pix.pixelformat == V4L2_PIX_FMT_YUYV || (native && pix.pixelformat == V4L2_PIX_FMT_UYVY);
+        const bool grey = native && pix.pixelformat == V4L2_PIX_FMT_GREY;
+        const size_t channels = grey ? 1 : yuyv ? 2 : 3;
         const size_t stride = std::max<size_t>(pix.bytesperline, pix.width * channels);
-        if (!pix.width || pix.width > 1920 || !pix.height || pix.height > 1080
-            || (yuyv && pix.width % 2) || (!yuyv && pix.pixelformat != V4L2_PIX_FMT_RGB24 && pix.pixelformat != V4L2_PIX_FMT_BGR24)
-            || stride > 16 * 1024 * 1024 / pix.height || pix.sizeimage > 16 * 1024 * 1024) {
-            v4l2_close(fd);
-            continue;
-        }
-        try { frame_.resize(std::max<size_t>(pix.sizeimage, stride * pix.height)); }
-        catch (...) { v4l2_close(fd); throw; }
         fd_ = fd;
         width_ = pix.width;
         height_ = pix.height;
         stride_ = stride;
         format_ = pix.pixelformat;
+        try {
+            if (native_) StartStreaming();
+            else frame_.resize(std::max<size_t>(pix.sizeimage, stride * pix.height));
+        } catch (...) { Close(); throw; }
         return;
     }
     if (denied) throw std::system_error(EACCES, std::generic_category());
     throw std::runtime_error("No usable webcam found");
 }
 
-Camera::~Camera() { if (fd_ >= 0) v4l2_close(fd_); }
+void Camera::StartStreaming()
+{
+    v4l2_requestbuffers request{};
+    request.count = 2; request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; request.memory = V4L2_MEMORY_MMAP;
+    Require(v4l2_ioctl(fd_, VIDIOC_REQBUFS, &request) == 0 && request.count > 0 && request.count <= 4,
+        "Cannot allocate native camera buffers");
+    buffers_.resize(request.count);
+    for (unsigned i = 0; i < buffers_.size(); ++i) {
+        v4l2_buffer buffer{};
+        buffer.type = request.type; buffer.memory = request.memory; buffer.index = i;
+        Require(v4l2_ioctl(fd_, VIDIOC_QUERYBUF, &buffer) == 0 && buffer.length > 0 && buffer.length <= 16 * 1024 * 1024,
+            "Invalid native camera buffer");
+        auto* data = static_cast<uint8_t*>(v4l2_mmap(nullptr, buffer.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, buffer.m.offset));
+        Require(data != MAP_FAILED, "Cannot map native camera buffer");
+        buffers_[i] = {data, buffer.length};
+        Require(v4l2_ioctl(fd_, VIDIOC_QBUF, &buffer) == 0, "Cannot queue native camera buffer");
+    }
+    auto type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    Require(v4l2_ioctl(fd_, VIDIOC_STREAMON, &type) == 0, "Cannot start native camera stream");
+    streaming_ = true;
+}
+
+void Camera::Close()
+{
+    if (streaming_) { auto type = V4L2_BUF_TYPE_VIDEO_CAPTURE; v4l2_ioctl(fd_, VIDIOC_STREAMOFF, &type); }
+    for (auto buffer : buffers_) if (!buffer.empty()) v4l2_munmap(buffer.data(), buffer.size());
+    buffers_.clear(); streaming_ = false;
+    if (fd_ >= 0) v4l2_close(fd_);
+    fd_ = -1;
+}
+Camera::~Camera() { Close(); }
 
 bool Camera::Capture()
 {
-    // libv4l starts streaming on the first read. The parent handles cancellation
+    if (native_) {
+        v4l2_format current{}; current.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        const auto step = format_ == V4L2_PIX_FMT_GREY ? 1U : format_ == V4L2_PIX_FMT_RGB24 || format_ == V4L2_PIX_FMT_BGR24 ? 3U : 2U;
+        Require(v4l2_ioctl(fd_, VIDIOC_G_FMT, &current) == 0 && current.fmt.pix.width == width_ && current.fmt.pix.height == height_
+            && current.fmt.pix.pixelformat == format_ && std::max(current.fmt.pix.bytesperline, width_ * step) == stride_, "Camera sample format changed");
+        pollfd ready{fd_, POLLIN, 0};
+        const int state = poll(&ready, 1, 50);
+        if (!state || (state < 0 && errno == EINTR)) return false;
+        Require(state > 0 && (ready.revents & POLLIN) && !(ready.revents & (POLLERR | POLLHUP | POLLNVAL)), "Native camera polling failed");
+        v4l2_buffer buffer{};
+        buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; buffer.memory = V4L2_MEMORY_MMAP;
+        const int result = v4l2_ioctl(fd_, VIDIOC_DQBUF, &buffer);
+        if (result < 0 && (errno == EAGAIN || errno == EINTR || errno == EIO)) return false;
+        Require(result == 0 && buffer.index < buffers_.size() && buffer.bytesused <= buffers_[buffer.index].size(), "Invalid native camera frame");
+        const bool usable = !(buffer.flags & V4L2_BUF_FLAG_ERROR);
+        if (usable) gray_ = CameraSamples(buffers_[buffer.index].first(buffer.bytesused), width_, height_, stride_, format_);
+        Require(v4l2_ioctl(fd_, VIDIOC_QBUF, &buffer) == 0, "Cannot requeue native camera buffer");
+        return usable;
+    }
+    // For QR capture, libv4l starts streaming on the first read. The parent handles cancellation
     // independently while this worker waits for a frame.
     const auto count = v4l2_read(fd_, frame_.data(), frame_.size());
     if (count < 0 && (errno == EAGAIN || errno == EINTR || errno == EIO)) return false;
@@ -91,34 +171,4 @@ bool Camera::Capture()
     return true;
 }
 
-QRScanner::QRScanner() : scanner_(zbar::zbar_image_scanner_create())
-{
-    Require(scanner_ != nullptr, "QR scanner allocation failed");
-    zbar::zbar_image_scanner_set_config(scanner_, zbar::ZBAR_NONE, zbar::ZBAR_CFG_ENABLE, 0);
-    zbar::zbar_image_scanner_set_config(scanner_, zbar::ZBAR_QRCODE, zbar::ZBAR_CFG_ENABLE, 1);
-    zbar::zbar_image_scanner_set_config(scanner_, zbar::ZBAR_QRCODE, zbar::ZBAR_CFG_BINARY, 1);
-}
-
-QRScanner::~QRScanner() { zbar::zbar_image_scanner_destroy(scanner_); }
-
-std::vector<std::string> QRScanner::Scan(std::span<const uint8_t> gray, unsigned width, unsigned height)
-{
-    Require(width > 0 && width <= 1920 && height > 0 && height <= 1080
-        && gray.size() == width * height, "Invalid camera image geometry");
-    using namespace zbar;
-    const std::unique_ptr<zbar_image_t, decltype(&zbar_image_destroy)> image(zbar_image_create(), zbar_image_destroy);
-    Require(bool(image), "QR image allocation failed");
-    zbar_image_set_format(image.get(), zbar_fourcc('Y', '8', '0', '0'));
-    zbar_image_set_size(image.get(), width, height);
-    zbar_image_set_data(image.get(), gray.data(), gray.size(), nullptr);
-    Require(zbar_scan_image(scanner_, image.get()) >= 0, "QR image scan failed");
-    std::vector<std::string> result;
-    for (auto symbol = zbar_image_first_symbol(image.get()); symbol; symbol = zbar_symbol_next(symbol)) {
-        const auto size = zbar_symbol_get_data_length(symbol);
-        if (size > 0 && size <= MAX_QR_TEXT && zbar_symbol_get_type(symbol) == ZBAR_QRCODE) {
-            result.emplace_back(zbar_symbol_get_data(symbol), size);
-        }
-    }
-    return result;
-}
 }

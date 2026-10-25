@@ -12,6 +12,7 @@ inline constexpr size_t MAX_WALLET_SETUP = 16384;
 inline constexpr size_t MAX_UR_MESSAGE = 2 * 1024 * 1024 + 65536;
 inline constexpr size_t MAX_UR_PARTS = 1024;
 inline constexpr size_t MAX_QR_TEXT = 4296;
+inline constexpr size_t MAX_ADDRESS_QR = 512;
 
 std::vector<uint8_t> CborBytes(std::span<const uint8_t> bytes);
 std::vector<uint8_t> UnwrapBytes(const std::vector<uint8_t>& cbor);
@@ -19,6 +20,8 @@ std::vector<uint8_t> UnwrapBytes(const std::vector<uint8_t>& cbor);
 struct QRMessage {
     std::string type;
     std::vector<uint8_t> cbor;
+    // Seed QRs are not public UR replies. Keep their raw payload in wiping storage.
+    SecretBytes secret{};
 };
 
 // One instance per scan. A conflicting stream never replaces collected data.

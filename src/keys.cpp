@@ -6,7 +6,6 @@
 #include <crypto/common.h>
 #include <crypto/hmac_sha256.h>
 #include <crypto/hmac_sha512.h>
-#include <crypto/sha256.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 
@@ -80,9 +79,28 @@ void ValidateMnemonic(std::span<const unsigned char> mnemonic)
     }
     Require(count >= 12 && count % 3 == 0, "Invalid recovery word count");
     const size_t entropy_bytes = count / 3 * 4;
-    CSHA256().Write(bits.data(), entropy_bytes).Finalize(checksum.data());
+    EntropyHash().Write(bits.data(), entropy_bytes).Finalize(checksum.data());
     const unsigned mask = 0xffU << (8 - count / 3);
     Require((bits[entropy_bytes] & mask) == (checksum[0] & mask), "Invalid mnemonic checksum");
+}
+
+SecretBytes EntropyMnemonic(std::span<const unsigned char> entropy)
+{
+    Require(entropy.size() == 16 || entropy.size() == 32, "Generation requires 128 or 256 bits");
+    SecretBytes checksum(32), words;
+    EntropyHash().Write(entropy.data(), entropy.size()).Finalize(checksum.data());
+    words.reserve(256);
+    for (size_t word = 0; word < entropy.size() * 3 / 4; ++word) {
+        unsigned index = 0;
+        for (size_t bit = word * 11; bit < (word + 1) * 11; ++bit) {
+            const auto byte = bit < entropy.size() * 8 ? entropy[bit / 8] : checksum[0];
+            index = (index << 1) | ((byte >> (7 - bit % 8)) & 1U);
+        }
+        if (word) words.push_back(' ');
+        words.insert(words.end(), ENGLISH[index].begin(), ENGLISH[index].end());
+    }
+    ValidateMnemonic(words);
+    return words;
 }
 
 SecretBytes MnemonicSeed(std::span<const unsigned char> mnemonic,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <key.h>
+#include <crypto/sha256.h>
 #include <support/allocators/secure.h>
 
 #include <array>
@@ -17,6 +18,11 @@ using Fingerprint = std::array<unsigned char, 4>;
 using Path = std::vector<uint32_t>;
 std::string PathText(const Path& path);
 
+// Secret hash state is erased, including on cancellation and exceptions.
+struct EntropyHash : CSHA256 {
+    ~EntropyHash() { memory_cleanse(this, sizeof(*this)); }
+};
+
 inline void Require(bool condition, const char* message)
 {
     if (!condition) throw std::invalid_argument(message);
@@ -27,6 +33,7 @@ unsigned ChineseWordIndex(std::string_view word);
 // indices; seeds always derive from the English text. ASCII input is copied as is.
 SecretBytes EnglishMnemonic(std::span<const unsigned char> mnemonic);
 void ValidateMnemonic(std::span<const unsigned char> mnemonic);
+SecretBytes EntropyMnemonic(std::span<const unsigned char> entropy);
 SecretBytes MnemonicSeed(std::span<const unsigned char> mnemonic,
                          std::span<const unsigned char> passphrase);
 std::string EncodePublic(const CExtPubKey& key, bool mainnet);

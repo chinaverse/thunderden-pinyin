@@ -2,28 +2,28 @@
 
 **Turn a spare laptop into an airgapped Bitcoin signer.**
 
-Thunder Den's image boots from USB and runs in memory. Import your existing
-recovery words, review transactions on the laptop and exchange data through QR
-codes.
+Thunder Den's image boots from USB and runs in memory. Generate new recovery words
+or import your existing ones, review transactions on the laptop and exchange data
+through QR codes.
 
 Thunder Den is designed so you can use AI to check its claims against the code
-before you use it. Its own signer and scanner code, build scripts, boot settings
-and image checks total only around 4,600 lines. We keep that code clear, with
-few dependencies and a simple build process.
+before you use it. Its own signer and worker code, build scripts, boot settings
+and image-content/assembly checks total about 5,800 lines, including comments and
+blank lines. We keep that code clear, with few dependencies and a simple build process.
 
 Inspired by SeedSigner's stateless approach and descriptor-based hardware-wallet
 designs, including Ledger, BitBox02 and Jade. Bitcoin Core provides key
 derivation, descriptor handling and transaction signing.
 
-**Status: Under active development. Use at your own risk.** The signer is usable
-with [Sparrow](#use-with-sparrow), [Keeper](#use-with-keeper) and [our Liana fork](#use-with-liana).
-See [implementation status](docs/STATUS.md) for completed checks and remaining work.
+Available as a preview, with support for [Sparrow](#use-with-sparrow) and
+[our Liana fork](#use-with-liana). See [security reviews](audits/README.md) and
+[implementation status](docs/STATUS.md) for details.
 
 ## Download and boot
 
-**[Download the USB image (64 MiB)](https://github.com/bitcoinerlab/thunderden/releases/download/v0.0.1-preview.6/thunderden.img)**
-· [SHA-256 checksum](https://github.com/bitcoinerlab/thunderden/releases/download/v0.0.1-preview.6/thunderden.img.sha256)
-· [Preview release notes and file inventory](https://github.com/bitcoinerlab/thunderden/releases/tag/v0.0.1-preview.6)
+**[Download the unsigned USB image (64 MiB)](https://github.com/bitcoinerlab/thunderden/releases/download/v0.0.1-preview.12/thunderden.img)**
+· [SHA-256 checksum](https://github.com/bitcoinerlab/thunderden/releases/download/v0.0.1-preview.12/thunderden.img.sha256)
+· [Preview release notes and file inventory](https://github.com/bitcoinerlab/thunderden/releases/tag/v0.0.1-preview.12)
 
 This image boots x86-64 (Intel/AMD) laptops with BIOS or UEFI. You can prepare the
 USB on macOS, Linux or Windows; Apple Silicon Macs can write it but cannot boot it.
@@ -34,8 +34,14 @@ USB on macOS, Linux or Windows; Apple Silicon Macs can write it but cannot boot 
 3. Wait for verification, eject the drive and boot the laptop from USB. Disable
    Secure Boot to boot this unsigned image.
 
-**Flashing erases the selected USB drive.** See the
-[build and USB guide](docs/BUILD.md) for more detail or to build your own image.
+For optional Secure Boot, use the [signed image](https://github.com/bitcoinerlab/thunderden/releases/download/v0.0.1-preview.12/thunderden-signed.img)
+([checksum](https://github.com/bitcoinerlab/thunderden/releases/download/v0.0.1-preview.12/thunderden-signed.img.sha256))
+and follow the [enrollment, verification and self-signing guide](docs/SECURE_BOOT.md).
+Both images contain the same runtime; the signed one requires the matching public
+certificate enrolled in enforcing UEFI firmware.
+
+See the [build and USB guide](docs/BUILD.md) for more detail or to build your own
+image.
 
 ## Design claims
 
@@ -45,8 +51,9 @@ USB on macOS, Linux or Windows; Apple Silicon Macs can write it but cannot boot 
 - The running signer cannot access disk storage, Ethernet, Wi-Fi or Bluetooth.
 - Wallet data and transactions move through QR codes.
 - You review and approve transactions on the laptop before signing.
-- Wallet requests arrive through QR codes; recovery input and approval use the
-  laptop's keyboard. Inputs are treated as untrusted and validated.
+- Wallet requests arrive through QR codes. Recovery words are entered locally or
+  scanned from a seed backup; approval uses the laptop's keyboard. Inputs are
+  treated as untrusted and validated.
 - The scanner runs separately from the keys and approval controls. Linux restricts
   its file and process access, and the running programs cannot overwrite the
   installed application files. See [scanner isolation](docs/ISOLATION.md).
@@ -58,9 +65,14 @@ USB on macOS, Linux or Windows; Apple Silicon Macs can write it but cannot boot 
 - English BIP39 recovery words with an optional printable ASCII passphrase.
 - Chinese (Simplified) BIP39 recovery words entered with pinyin; keys derive from
   the equivalent English phrase.
+- [SeedQR and CompactSeedQR backups](docs/SEED_QR.md) for 12/24 words, with explicit
+  import confirmation and a seed-first menu (included from preview 10).
+- [Generate 12 or 24 recovery words](docs/ENTROPY.md) using Bitcoin Core randomness,
+  with optional camera, coin or dice input and full backup re-entry.
 - Descriptor-based wallets, including SegWit and Taproot Miniscript.
 - BIP-388 wallet policies with seed-bound registration proofs.
 - BIP44, BIP49, BIP84 and BIP86 defaults without prior registration.
+- Verify scanned addresses against a standard account or loaded multisig wallet.
 - Partial signing when other signatures or spending conditions are still needed.
 - UR v2 scanning and animated QR output, with the scanner isolated from keys
   and approval.
@@ -70,8 +82,8 @@ USB on macOS, Linux or Windows; Apple Silicon Macs can write it but cannot boot 
 ## Use with Sparrow
 
 [Sparrow](https://sparrowwallet.com/) exchanges QR codes directly with Thunder Den
-for single-signature and sorted-multisig wallets. In Sparrow, choose
-**Airgapped Hardware Wallet → SeedSigner** for Thunder Den's keystore.
+for single-signature and sorted-multisig wallets. Use **Sparrow 2.5.5 or later** and
+choose **Airgapped Hardware Wallet → Krux** for Thunder Den's keystore.
 
 Share the public key, create the wallet in Sparrow, then scan its transaction QR
 on Thunder Den. Multisig setup can be approved directly from a complete PSBT.
@@ -80,33 +92,24 @@ The preview 5 image was user-tested with Sparrow multisig on a real device. See 
 
 ## Use with Keeper
 
-In [Bitcoin Keeper](https://bitcoinkeeper.app/), select **Jade → QR** for Thunder Den.
-Its standard account QR imports through that profile. For multisig signing, scan
-Keeper's PSBT first; when Thunder Den requests wallet setup, tap **Vault details**
-on Keeper's signing screen and scan its registration QR. Review and approve with
-`REGISTER`, then continue to transaction review and `SIGN`.
-
-Preview 6 also lets you scan that registration QR directly from Thunder Den's main
-menu. After approval, **Loaded wallet** appears for the session. The inline flow
-was user-tested on iOS/testnet4. See the [Keeper guide](docs/KEEPER.md) for the steps,
-supported formats and validation scope.
+**Bitcoin Keeper:** see the [compatibility guide](docs/KEEPER.md) for supported
+workflows and current limitations.
 
 ## Use with Liana
 
 Thunder Den is currently usable with [our Liana fork](https://github.com/bitcoinerlab/wizardsardine-liana).
 The integration has **not yet been submitted to upstream Liana**.
 
-Build and run the GUI from that fork using its
-[build instructions](https://github.com/bitcoinerlab/wizardsardine-liana/blob/master/doc/BUILD.md#building-the-project).
-The integration has been built and tested with Rust 1.88. Choose **Bitcoin Core
-or Electrum** as the wallet backend. Thunder Den support for Liana Connect is
-disabled until its server supports Thunder Den registration tokens.
+Build and run the GUI using the [pinned installation guide](docs/LIANA.md), which
+identifies the Liana, async-hwi and bridge versions and preserves their lockfiles.
+Choose **Bitcoin Core or Electrum** as the wallet backend. Thunder Den support for
+Liana Connect is disabled until its server supports Thunder Den registration tokens.
 
 On the same computer as Liana, start the [QR bridge](https://github.com/bitcoinerlab/thunderden-qr-bridge)
 with Node.js 22 or later:
 
 ```sh
-npx @bitcoinerlab/thunderden-qr-bridge
+npx @bitcoinerlab/thunderden-qr-bridge@0.1.2
 ```
 
 Choose the same Bitcoin network in Thunder Den and Liana, then open Liana's
@@ -144,6 +147,7 @@ To build your own USB image, follow the [build and test instructions](docs/BUILD
 - [Thunder Den QR protocol](docs/PROTOCOL.md)
 - [Dependencies](docs/DEPENDENCIES.md)
 - [Implementation status](docs/STATUS.md)
+- [Audit reports and finding status](audits/README.md)
 
 Tests and development tools run on the build computer. They are not part of the
 production image. Wallet applications can use the standard PSBT QR format or
@@ -164,3 +168,8 @@ Thanks to **SeedSigner** for inspiration, **Salvatore Ingala (Ledger)** for the
 wallet-policy and registration design and **Bitcoin Core's contributors** for
 the Bitcoin engine. Thunder Den also builds on Linux, Buildroot and the other
 upstream projects listed in its dependency documentation.
+
+## License
+
+Thunder Den's own code is licensed under the [MIT License](LICENSE).
+Third-party dependencies retain their respective licenses.

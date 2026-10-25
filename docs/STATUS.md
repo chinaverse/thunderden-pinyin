@@ -1,29 +1,310 @@
 # Implementation status
 
-As of 2026-10-01, the signer, QR bridge and regular desktop Liana integration are
+As of 2026-10-21, the signer, QR bridge and regular desktop Liana integration are
 implemented. Thunder Den is usable with [our Liana fork](https://github.com/bitcoinerlab/wizardsardine-liana)
 using Bitcoin Core or Electrum. The Liana integration has not yet been submitted
 upstream. The [Sparrow multisig workflow](SPARROW.md) has been user-tested on a real
 device and its image approved for release. The earlier BIP44 single-signature
 workflow was also user-tested on a physical computer.
 The [Keeper Jade QR multisig workflow](KEEPER.md) was user-tested on iOS/testnet4
-with the text-setup development image; the report and scope are recorded below.
+with the text-setup development image; that test predates the stricter fee policy
+below. See the guide for current limitations.
 
 The QR bridge is published on npm as version `0.1.2`. The latest USB image is
 published as the development preview
-[`v0.0.1-preview.6`](https://github.com/bitcoinerlab/thunderden/releases/tag/v0.0.1-preview.6),
-with its checksum and installed-file inventory. BIOS/UEFI boot checks passed;
-USB write/read-back checks are recorded per image below. Broader laptop/camera coverage and a fresh
-full clean-build comparison remain outstanding.
-Current executable sizes refer to the latest recorded build below.
-Preview 6 adds text multisig setup and main-scanner wallet preloading to the
-direct multisig/compact-PSBT signing and account-key QRs introduced in preview 5.
+[`v0.0.1-preview.12`](https://github.com/bitcoinerlab/thunderden/releases/tag/v0.0.1-preview.12),
+with unsigned/signed images, public signing material, checksums and installed-file
+inventory. Verification is revision-scoped below: earlier boot, USB read-back and
+clean-build results do not automatically apply to this latest image. Broader
+laptop/camera coverage remains outstanding. Executable sizes and verification
+records below refer to their named revisions, not automatically to the latest image.
+Preview 8 adds recovery-word generation with mandatory Bitcoin Core randomness,
+optional camera/coin/dice input and full backup re-entry. It includes the
+[seed-generation audit fixes](../audits/FINDINGS.md) and clearer generation screens.
 
 The [Thunder Den QR protocol](PROTOCOL.md) covers standard PSBT exchange, public
 exports and wallet-independent commands. Physical camera measurements remain
 separate from the automated checks below.
 
+## Preview 12 approval feedback (2026-10-21)
+
+The runtime source is `20827311dfb0bad100095544a309812d5c0e0363`. Release
+documentation is added above that revision without changing runtime/build inputs.
+Both images are 67,108,864 bytes:
+
+- Unsigned: `0c22d04d73a2f9c24cd35451bbeb9488c5efc732639b535573039b2d3cae0daf`
+- Signed: `7943afff3b158e36e30a11336f45ff111936da3852f5771b74e516d12ba6dea4`
+
+Typed `SIGN` and `REGISTER` approvals now ignore ASCII capitalization and outer
+spaces. Genuine typos and empty entries show feedback and allow correction without
+rescanning or restarting the required review. Fresh, explicit confirmation is still
+required: queued input, prefixes, misspellings and truncated overlong entries cannot
+approve. Explicit cancellation remains separate from invalid input. High-change
+recovery warnings remain visible after typos and overlong input. Passphrases,
+recovery words, addresses and public keys retain their existing handling.
+
+Command failures with statuses 2, 4 and 5 are explained locally before the error
+response QR. The explanation can be revisited from that QR without retrying the
+operation. The wire status codes and empty error result remain unchanged; no
+diagnostic text or request data is added to error replies.
+
+The terminal, application and QR-command suites passed for the runtime source.
+Regressions cover compact/wide screens, mixed-case and spaced keywords, correction
+and cancellation, queued-input rejection, warning retention, unchanged wallet/key
+state and empty error replies. This source-matched passing evidence was reused for
+the image build. Source-integrity, frozen/compiled-source matching, installed-content
+and kernel restrictions, repeatable disk assembly and canonical format-2 layout
+checks passed. Manual signing remained separate from compilation; public-only
+packaging verified the trusted certificate and detached/attached EFI signatures.
+
+No new VM run, physical confirmation, empty-output clean-build comparison or
+independent audit of this exact image is recorded. The full native suite was not
+rerun. Earlier verification retains its original revision scope; TD-005 remains
+open with conditional authenticated-boot mitigation.
+
+## Preview 11 startup, camera and QR updates (2026-10-20)
+
+The runtime source is `7a642b562235e9e30a6177aa76e3ca8af0abacaf`. The image was
+built from byte-identical source files before that commit; release documentation
+does not change its runtime/build inputs. Both images are 67,108,864 bytes:
+
+- Unsigned: `e9c9e622ae3c129d85c636b8c2421e432130e78c063caadf61126931fb317242`
+- Signed: `122729796b7466a6db455bda984e1de075c21fd95176f989ebe611108897002f`
+
+Animated QR frames are prepared offscreen, then copied into the QR rectangle
+without clearing the existing code or captions. The shared static/SeedQR path
+securely wipes staging pixels. This is not an atomic, refresh-synchronized swap;
+tearing remains possible. **Change network** is offered only before loading keys.
+Camera collection and review now finish before choosing coins or dice. Cancelling
+capture discards the attempt, with continuing without camera data as the default
+and retrying as an explicit choice. Mandatory Core randomness is unchanged.
+
+Image format 2 stores one self-contained EFI payload, shared by BIOS and UEFI.
+Legacy BIOS does not authenticate its EFI signature. Current packaging tools
+accept only format 2; use matching tagged tools for older releases. Thunder Den's
+own code is now explicitly MIT-licensed; dependencies retain their own licenses.
+
+The camera/display, SeedQR and transport suites passed for this runtime, covering
+optical decoding, 16/24/32-bit RGB/BGR layouts, padded strides, viewport offsets,
+quiet zones, integer scaling, staging-buffer cleansing and review navigation.
+The actual unsigned image booted in QEMU TCG at 1024×768. Its animated public-fixture
+hdkey export produced 160 consecutive captures over about eight seconds: no blank
+or undecodable frames, no caption changes and exact payload reconstruction.
+This was an export test, not a new signing walkthrough or browser-emulator test.
+
+The preceding network change passed terminal and application suites; camera reflow
+passed five focused terminal/entropy suites at its recorded revision. Those results
+retain their original scope. Source-integrity, frozen/compiled-source matching,
+installed-content/kernel, repeat-assembly and canonical-layout checks passed.
+Signing remained manual and separate from compilation. Public-only packaging
+verified the trusted certificate and both detached and attached EFI signatures.
+
+The full native suite and broad VM matrix were not rerun for this final revision.
+No new empty-output clean-build comparison, physical confirmation or independent
+audit of this exact image is recorded. Earlier evidence retains its original scope;
+TD-005 remains open with conditional authenticated-boot mitigation.
+
+## Seed QR sessions (preview 10)
+
+Current source starts with scanning a seed QR, entering recovery words or creating
+a new wallet. SeedQR and CompactSeedQR support 12/24 English words, explicit local
+confirmation and the existing optional-passphrase flow. The active menu shows
+the seed fingerprint below a blank line, retains the existing scan description
+and pins any loaded wallet setup while compact menus scroll.
+
+Generated-word backups show Standard SeedQR beside the words by default; F
+switches format and Q hides/shows it. Smaller screens can open a separate QR
+view without skipping word pages. A second seed scan cannot replace an active
+session: the user keeps the session or explicitly ends its process and rescans.
+The [seed QR guide](SEED_QR.md) records format ambiguity and secret-handling limits.
+
+Typed and scanned imports now offer an optional **S: Show words/QR** action before
+the passphrase. The private view uses the same words, supports format/visibility
+controls and returns to the import review with Enter or Esc. It does not trigger
+generation's backup-reentry check or retain the phrase in the loaded session.
+Manual 15/18/21-word imports have a words-only view. Normal Continue and queued
+input do not display the secret backup.
+
+At `6d1d09b4d7a6e39143c2d28feb36823f6dcea34b`, all 20 rebuilt native suites passed
+without skips in 203.71 seconds (two parallel test slots). Coverage includes all nine published SeedSigner vectors,
+numeric/binary optical round
+trips (including NUL/CR/LF), strict seed validation, address precedence, confined
+seed IPC, full VGA previews and large request records. Framebuffer tests decode
+12/24-word backups at 640×480, 1280×800 and 2560×1600, switch/hide/restore the QR,
+check unchanged word pixels and clear the framebuffer on completion/cancellation.
+Terminal tests cover local scan confirmation, passphrases, fingerprint spacing
+and compact-menu scrolling. Import-view regressions cover typed/scanned seeds,
+all manual word counts, queued-Show rejection, default privacy, repeated viewing,
+held-Escape isolation, readable Standard/Compact QR output and private-pixel
+clearing before returning to review. Launcher tests retain fresh-process session
+clearing.
+
+### Preview 10 image and follow-up checks (2026-10-17)
+
+The released runtime is built from `499f9abe99fcfca7b360b85a98d84e0413c7cf84`.
+The release tag adds documentation only above that revision; runtime/build inputs
+match the archived build. Both images are 67,108,864 bytes:
+
+- Unsigned: `e681941fadd1131fac8c234300ffc3b305e671632fefa8c4ed19208556476500`
+- Signed: `b82acb92955809c2d4513d250afcf02b224cfd72bead3afdd4f58c52a8a7313b`
+
+The `6d1d09b` image passed BIOS at 640×480 and unsigned UEFI at 1280×800,
+including decoding Standard/Compact backup QRs, hiding/restoring the QR, returning
+to the import review, public-account export and fresh-session restart. Secure Boot
+was not enforcing in those UEFI checks.
+
+Later UI changes at `a1929ca` passed the SeedQR, terminal and camera/framebuffer
+suites without skips. These check the shared header, orange network label,
+dividers, footer, centered QR captions and 12/24-word layouts at 640×480,
+1024×768, 1280×800, 1366×768 and 2560×1600, including format/visibility controls
+and private-pixel clearing. At `499f9ab`, the application suite passed, including a
+regression that keeps the standard public-key review on one 80×24 screen while
+retaining its privacy explanation. The final image build reused that matching
+passing evidence; the full 20-suite run above was not repeated on this revision.
+
+The final image uses the compatible pinned development build cache. Frozen source
+matches the compiled application, installed runtime hashes match the inventory,
+and kernel/image-content, repeat-assembly and canonical-layout checks passed.
+Manual signing remained separate from compilation. Public-only packaging verified
+the approved certificate and both detached and attached EFI signatures.
+
+No fresh empty-output build comparison, final-image VM boot matrix or final-image
+physical hardware confirmation is recorded for preview 10. Preview 9's signed-boot,
+camera, fee-policy, USB read-back and clean-build results below remain valid for
+their original revisions; they are not reclassified as pending or claimed for this
+new image. Further independent review remains deferred, and TD-005 remains open
+with conditional authenticated-boot mitigation.
+
+## Fee verification (preview 9)
+
+Current source rejects insufficiently verified fees in `ReviewedTransaction::Sign`
+before approval or signature generation. The former warning override is removed;
+the error directs Sparrow users to its setup guide. Single-input SegWit/multisig,
+sufficiently binding Taproot signatures and authenticated multi-input requests
+remain supported. See [TD-001](../audits/FINDINGS.md#td-001).
+
+Initial fix verification passed all 18 rebuilt native suites without skips in
+193.19 seconds. Regressions cover both attack requests, no approval/signing calls,
+empty command error replies, blocking interactive errors at 40/80 columns and
+successful safe compact signing.
+
+The recommended Sparrow setup is now **2.5.5+ with Krux**. A user-supplied recording
+of its normal Show QR output decoded to a two-input PSBT with both valid previous
+transactions. On 2026-10-16, the maintainer also confirmed physical validation of
+the fee-policy QR signing workflow during the current candidate session; see
+[the current scope](#current-release-candidate-2026-10-16).
+Keeper v2.6.3 source exports compact PSBTs through the ordinary Jade QR route;
+general multi-input SegWit compatibility therefore needs a full-data export route.
+
+This change is not included in preview 8, but is included in the current candidate.
+The integration records below retain their original test scope and signing policy.
+
+## Authenticated UEFI boot (preview 9)
+
+The `feature/authenticated-boot` branch provides optional signing of the complete
+EFI kernel and its embedded runtime. UEFI no longer loads GRUB. Fixed built-in
+arguments and `noinitrd` prevent external boot arguments/filesystems from
+replacing authenticated startup. Legacy BIOS retains its separate GRUB path.
+The unsigned/signed release pair uses the same runtime; public-only tools verify
+the signing certificate and reconstruct the signed disk exactly from the unsigned
+image and detached EFI signature. See [the guide](SECURE_BOOT.md).
+
+Production signing keys are generated and used manually by the owner, outside
+the build/agent workflow. Automated signing regressions use disposable keys; the
+maintainer has also manually signed the current candidate with a locally held
+encrypted image-signing key. Tools accessed only its public certificate/signatures.
+The maintainer approved that tested certificate as the project's release-signing
+certificate; preview 9 includes its public certificate and detached signature.
+Firmware trust, legacy BIOS and rollback remain explicit limits under
+[TD-005](../audits/FINDINGS.md#td-005).
+
+### Initial implementation verification (2026-10-15)
+
+All 18 native suites passed without skips (193.21 seconds). The first rebuilt
+64 MiB image passed content and repeat-assembly checks; BIOS and direct-UEFI
+workflow tests decoded the expected public BIP84 account QR and checked session
+restart. The signed image also passed that complete workflow under Secure Boot
+and legacy BIOS.
+
+Pinned QEMU/OVMF tests with disposable RSA-3072 code-signing certificates passed:
+trusted signed boot, unsigned/wrong-key/modified-runtime refusal, hostile command
+line isolation, ignored unsigned GRUB configuration and ignored external
+`LoadFile2` initramfs. A pre-fix kernel accepted the injected initramfs as a
+positive control. Packaging tests passed exact whole-image reconstruction,
+timezone-independent outputs, encrypted-key password prompting, user self-signing
+and rejection of valid signatures for different runtime bytes. Public test
+evidence is retained under `out/authenticated-boot/`; no production key or host
+firmware was used. Two builds from separate empty output volumes produced
+byte-identical boot payloads, initramfs, installed-file inventory and complete
+64 MiB images, also identical to the cached image used in the boot tests. These
+builds shared the pinned builder and verified source/download caches, not compiled
+outputs; they are not two independently rebuilt Docker environments. The unsigned
+image SHA-256 is
+`6d7020a03ed8a6ccd6feea58108b505795c086c7a0fb1f63851fbee4bce1be14`.
+Attaching the retained public test signature to a fresh build reconstructed the
+same signed image exactly. The existing legacy-path guest-isolation probe also
+passed with the rebuilt kernel and toolchain, including real JPEG/QR/UR decoding.
+This initial lab checkpoint predates the maintainer's physical follow-up below.
+
+### Current release candidate (2026-10-16)
+
+This subsection records preview 9, not the preview 10 image above.
+
+The candidate uses runtime source `e85d560a69eee6d6ec7a37f35cb8928d27ba5fae`, including
+the camera assessment progress/stop controls and completion-or-manual-stop policy
+cherry-picked from `master`. Both images are 67,108,864 bytes. Their SHA-256 hashes are:
+
+- Unsigned: `1d1b2d0dbfa8b69c587baecd99c9e70342531469939ed567c48fb031878821dc`
+- Signed: `ee39a4c03f4ee53783f15ddc227aa5163d4192b606332f4953b9fdca87b38344`
+
+All 19 native suites passed without skips in 255.46 seconds. The source actually
+compiled matches the frozen commit. Installed-file/kernel restrictions and
+repeat-assembly checks passed, including fixed boot arguments and `noinitrd`.
+BIOS and authenticated-UEFI account-QR/session workflows passed. Current-kernel
+OVMF regressions passed unsigned/wrong-key/modified-runtime refusal, external
+startup-input isolation and the 100-year-certificate/future-clock checks.
+
+The maintainer manually produced a new signature for these runtime bytes. Public
+tools verified it and reconstructed the signed disk byte-for-byte. The exact
+signed image completed the account-QR/session workflow under an OVMF trust store
+enrolled through the actual authenticated import packages; the matching unsigned
+image was refused. Each candidate-runtime USB write had a full 64 MiB read-back
+comparison and an EFI-file/signature-state check. The image-signing private key was
+never accessed by the agent, build or verification containers.
+
+The maintainer enrolled the public trust configuration on an **HP ProBook x360
+11 G5 EE, BIOS S96 01.12.00**, then reported signed UEFI boot acceptance and matching
+unsigned-image refusal with the instructed unchanged Secure Boot-enabled,
+Legacy-disabled settings. This pair provides reported physical enforcement
+evidence beyond the initial import screen's Audit Mode message. The maintainer
+also confirmed physical camera behaviour and the fee-policy QR signing workflow
+during this candidate session. These are user reports, not independently observed
+tests; camera formats/geometry, individual reconnect/slow-device cases, wallet
+application/version and broadcast outcome were not separately recorded. They do
+not establish cross-device compatibility or measured camera entropy.
+
+The candidate was first built using the pinned builder/toolchain cache. A new,
+empty output volume then rebuilt the cross-toolchain, kernel and application.
+Its `boot.img`, `grub.img`, `rootfs.cpio`, `bzImage`, complete disk image, checksum
+and installed-file inventory matched the tested cached build byte-for-byte.
+Applying the retained public signature to that fresh unsigned image reconstructed
+the same signed image exactly, without access to the private key. This comparison
+shared the pinned Docker builder and verified source/download caches; it was not
+an independently rebuilt Docker environment. The earlier two-clean-build result
+above retains its original source-revision scope.
+
+At the maintainer's request, a fresh independent review of the corrected/current
+source is deferred until after preview 9 and planned further improvements.
+See [the review plan](../audits/README.md#follow-up-status-2026-10-16). Preview 9
+remains a development preview, not a security certification. TD-005 remains open
+with conditional mitigation. Laptop-specific ownership/enrollment material stays
+outside the repository and is not part of release assets.
+
 ## Architecture
+
+Recovery-word generation is included from preview 8, with mandatory system
+randomness and optional camera/manual contributions. See [design and use](ENTROPY.md)
+and [measured results](ENTROPY_BENCHMARKS.md).
 
 Native code links pinned, unmodified Bitcoin Core libraries for keys, descriptors,
 Miniscript, PSBT review and signing. Recovery input uses English words and printable
@@ -33,7 +314,8 @@ The signing path runs in-process without a daemon, RPC server or node database.
 Core's RNG, allocation, logging support and shared MuSig helpers remain linked
 dependencies. MuSig policies and input metadata are rejected. Camera/QR decoding
 runs in an isolated process, separate from keys and local approval. The stripped
-Buildroot executables are a 2,615,536-byte signer and an 88,176-byte scanner, with
+preview-10 executables are a 2,722,544-byte signer, a 116,848-byte QR scanner,
+a 30,808-byte camera entropy worker and a 220,040-byte NIST assessment worker, with
 shared libraries installed separately. The hybrid disk image is 64 MiB. See
 [Scanner isolation](ISOLATION.md) for the threat model and enforced boundary.
 
@@ -41,6 +323,7 @@ shared libraries installed separately. The hybrid disk image is 64 MiB. See
 
 - [x] Verify reuse of Core BIP32/key code without its node/wallet engines.
 - [x] Implement English/ASCII BIP39 and in-memory key sessions as a native library.
+- [x] Generate 12/24 recovery words with optional supplemental inputs and full backup re-entry.
 - [x] Implement native policy validation, wallet IDs and HMAC authorization.
 - [x] Implement immutable native transaction review and approval-gated signing.
 - [x] Implement the local interface and UR v2 transport.
@@ -53,24 +336,27 @@ shared libraries installed separately. The hybrid disk image is 64 MiB. See
 - [x] Integrate Thunder Den into a Liana fork for Bitcoin Core and Electrum wallets.
 - [x] Record a user-tested Sparrow single-signature BIP44 QR workflow.
 - [x] Record real-device Sparrow multisig testing and release approval.
+- [x] Record user-tested physical address verification across all 13 demo cases.
 - [x] Record user-tested Keeper Jade QR multisig signing on iOS/testnet4.
+- [x] Record user-reported HP signed acceptance/unsigned refusal and camera/fee-policy QR validation.
 - [x] Publish a development USB image with its checksum and installed-file inventory.
-- [ ] Validate physical webcams and supported laptops, including reconnects and slow cameras.
-- [ ] Complete verification of a release image built from the final source revision.
+- [ ] Extend physical laptop/webcam coverage beyond the reported HP, including reconnects and slow cameras.
+- [x] Verify release images against the recorded runtime source and pinned build inputs.
 
 `platform/` defines the Buildroot application package, runtime launch, kernel
 and bootloader configuration. `build/image.py` assembles the hybrid disk image.
 
 ## Liana integration
 
-The [Liana fork](https://github.com/bitcoinerlab/wizardsardine-liana) includes
-Thunder Den support on `master` at commit `85e7681f`. It uses
-[our async-hwi fork](https://github.com/bitcoinerlab/wizardsardine-async-hwi), pinned
-to commit `dbbd1a7d29ddda504eb62b5f9d750d7c4ef21d34`. The
-[QR bridge](https://github.com/bitcoinerlab/thunderden-qr-bridge) is available as
-`@bitcoinerlab/thunderden-qr-bridge@0.1.2`, published from commit `59a6aa3`.
-The bridge's current Git checkout includes later connection-caching and interface
-improvements through commit `1ac684c`; those changes are not yet published on npm.
+The [pinned installation guide](LIANA.md) records the source/package combination:
+Liana [`85e7681f`](https://github.com/bitcoinerlab/wizardsardine-liana/tree/85e7681fc0aec8ab3fcfb11b47cb5b32d3cac63d),
+with async-hwi pinned in both its manifest and lockfile to
+[`dbbd1a7d`](https://github.com/bitcoinerlab/wizardsardine-async-hwi/tree/dbbd1a7d29ddda504eb62b5f9d750d7c4ef21d34),
+and `@bitcoinerlab/thunderden-qr-bridge@0.1.2`, published from
+[`59a6aa3`](https://github.com/bitcoinerlab/thunderden-qr-bridge/tree/59a6aa35cbfc4b97f0ea99d64fae62a33e49e68d).
+Later bridge connection-caching and interface improvements through `1ac684c` are
+not part of that npm package. The guide includes its archive checksum and locked
+build commands; future upgrades require an updated verification record.
 
 Regular desktop Liana can retrieve public keys, register wallets, verify addresses
 and sign PSBTs through the bridge. Bitcoin Core, including Liana-managed Core,
@@ -201,6 +487,18 @@ The eleven native suites and the Sparrow account/signing checks passed after thi
 simplification. The updated boot probe passed on the `a56f61b` image, checking the
 public account QR, three-action menu and session restart in both BIOS and UEFI.
 
+## Physical address verification
+
+On 2026-10-15, the user confirmed successful physical testing of all 13 cases in
+`/tmp/opencode/thunderden-address-demo/`. These cover receiving/change addresses,
+payment-URI destination checks, another account, index 1007, wrong-wallet and
+wrong-network cases, native/nested multisig registration and address checks,
+single-signature selection with multisig loaded, Taproot and legacy addresses.
+This completes [TD-002's pending validation](../audits/FINDINGS.md#td-002--direct-address-verification).
+The report does not separately identify hardware models or the flashed revision;
+it does not validate the latest fee-policy change or establish general camera
+compatibility. The public cases come from `address-check-tests --fixtures`.
+
 ## Text multisig setup and Keeper integration
 
 Current source adds a wallet-independent text multisig configuration codec inside
@@ -245,11 +543,15 @@ in the published preview 5 image.
 
 ## Verified native behavior
 
-`docker compose run --build --rm test` runs eleven suites on Linux/amd64:
-`qr-commands`, `foundation`, `transactions`, `core-keys`, `native-runtime`, `transport`,
+`docker compose run --build --rm test` runs nineteen suites on this branch on Linux/amd64:
+`entropy`, `assessment-progress`, `mnemonic-cleanup`, `entropy-camera`, `entropy-capture`,
+`entropy-confinement`, `entropy-assessment`,
+`address-check`, `qr-commands`, `foundation`, `transactions`, `core-keys`, `native-runtime`, `transport`,
 `application`, `export-compat`, `terminal`, `camera` and `isolation`.
-Actual native confinement tests require Landlock ABI 6 and are reported as skipped
-on hosts without it; scanner operation never falls back to an unconfined mode.
+The full suite requires Landlock ABI 6 enabled and usable inside the container.
+Only `isolation` reports an unsupported ABI as skipped. Entropy confinement,
+assessment and their terminal cases fail on unsupported hosts; production workers
+never fall back to an unconfined mode.
 
 The ARM64 development image also compiles successfully, including the application
 and test executables. This compilation check ran under emulation on an AMD64 host;
@@ -269,6 +571,10 @@ native ARM64 test execution remains unverified.
   overlapping derivations, literal-key injection and malformed policies.
 - Wallet-ID vectors with one, two and three keys and a CompactSize boundary.
 - Descriptor/Miniscript parsing and public script derivation through Core.
+- Plain address/payment-URI checks for standard accounts and the loaded multisig
+  wallet: both branches, bounded ranges, exact indices, cancellation/resume and
+  unchanged account/policy selection. Tests cover Base58/Bech32 case, network
+  handling, hostile URI parameters and confined QR-to-parent delivery.
 - BIP44/49/84/86 signing, custom branches, repeated account-key references,
   legacy/wrapped/native multisig and SegWit/Taproot Miniscript.
 - Timelock and hashlock scripts, missing-preimage partial signing, successive
@@ -278,7 +584,8 @@ native ARM64 test execution remains unverified.
 - False change hints, mismatched scripts/Taproot commitments, incorrect previous
   outputs, duplicate inputs, amount limits, malformed PSBTs/signatures and
   unsupported signing rules.
-- External input disclosure, authenticated or explicitly unverified fee accounting,
+- External input disclosure, authenticated fee accounting and refusal of unsafe
+  compact requests,
   compact SegWit/Taproot signing and untrusted-signature-independent size estimates.
 - Verified Core source remains unchanged by configuration/build. Selected
   node/RPC/wallet/LevelDB symbols are absent from the signing test executable.
@@ -306,7 +613,10 @@ native ARM64 test execution remains unverified.
   descriptor in Details. Registration keeps spending rules and cosigner keys in
   the required review; switching views preserves required pages and typed consent.
 - Signing summaries retain full non-change destinations and amounts, fees,
-  verified change totals, qualified mixed-input accounting and active lock conditions.
+  each verified change amount/index, change totals, qualified mixed-input accounting
+  and active lock conditions. Change indices above 50,000 also expose the full
+  address and a recovery warning in mandatory review. Native cases cover the
+  threshold, cancellation and spending existing high-index inputs.
   Signing/registration Details show technical fields without repeating the summary.
 - Completed QR results can reopen their text review and redisplay identical reply
   payloads without repeating approval. Enter leaves the QR visible; Esc finishes
@@ -551,6 +861,64 @@ the downloaded image checksum passed and public asset URLs returned HTTP 200.
 The release image was written to USB serial `55630D9D`; all 67,108,864 bytes matched
 on read-back, and the drive was safely powered off.
 The fresh full clean-build comparison and broader physical-device coverage remain open.
+
+The seventh published preview, `v0.0.1-preview.7`, uses an image built on 2026-10-13
+from application source commit `b6b9c16406e3476e6b2a0333281a648f02c327e1`.
+It adds plain address/payment-URI verification against a selected standard account
+or approved multisig wallet, bounded receiving/change searches and clearer review
+screens. Mandatory transaction review now discloses each change index and warns
+about recovery at unusually high indices. The signer still reports application
+version `0.0.1`. Its size is 67,108,864 bytes and SHA-256 is:
+
+```text
+4ebcf74e19543399f09db6acc8747b1bacd511a6519bdd64b738f1efca826073
+```
+
+All twelve native suites passed, with none skipped. The build/test invocation
+reached its tool timeout during the last suite; that isolation suite passed when
+rerun separately. Tests cover address/network validation, both address branches,
+account selection, bounded search, full-address display, compact-screen guidance,
+stop/resume, wallet replacement and approval boundaries. Source and pinned build
+inputs match the image build; installed-content/kernel checks, checksum and repeat
+assembly passed. BIOS/UEFI boot checks passed at 1280x800, including account QR
+decoding, review navigation and session restart. Release documentation is added
+above the application revision without changing application code or build inputs.
+The image contains no OCR executable, models or OpenCV. Dependencies were reused
+from the non-OCR build cache; a fresh full clean-build comparison and physical-camera
+validation of the new address screens remain pending. The compact-PSBT fee risk
+remains as documented in [FEES.md](FEES.md) and audit finding TD-001.
+
+The eighth published preview, `v0.0.1-preview.8`, uses an image built on 2026-10-14
+from application source commit `b0ab76d5cd99722fb478af10a2264f706ae09125`.
+It generates 12 or 24 BIP39 words using mandatory Bitcoin Core randomness, with
+optional camera, coin or dice contributions. The camera is selected by default;
+manual input defaults to continuing without coins or dice. Generated words require
+complete backup re-entry before use. Existing 12/15/18/21/24-word import is retained.
+The signer still reports application version `0.0.1`. The image is 67,108,864 bytes
+and its SHA-256 is:
+
+```text
+43f3a7b9bcb5febea564f2f02a4137cb176c73a31392abe98581865094b94d4d
+```
+
+All 18 native suites passed, none skipped, in 196.99 seconds. Coverage includes
+mandatory RNG failure, supplemental input, worker confinement, camera timing and
+format fallback, assessment report validation, backup re-entry, cancellation,
+compact-screen guidance and existing signing/QR flows. The compiled source matches
+the application revision. Image content, permissions, kernel restrictions, checksum
+and repeat-assembly checks passed. BIOS and UEFI QEMU boot checks passed, including
+public account QR decoding, review navigation and session restart. The image was
+written to USB serial `55630D9D`; the full 64 MiB read-back matched, and the drive was
+safely powered off. Release documentation is added above the application revision
+without changing application code or build inputs.
+
+The image includes the fixes recorded for TD-006–TD-008 and TD-010–TD-013.
+Independent AI audits reviewed the earlier `6b22f6d` revision; a fresh independent
+audit of the corrected revision and physical-camera validation remain pending.
+Camera statistics describe the checked data, not a guaranteed contribution to the
+wallet's randomness. This build reused the pinned toolchain/dependency cache;
+a fresh full clean-build comparison remains pending. TD-009 remains open, as does
+the compact-PSBT fee risk (TD-001); see [audit findings](../audits/FINDINGS.md).
 
 Transaction fixtures use synthetic previous transactions and Core script
 verification, not chain/mempool acceptance. Dependency/syscall checks run the

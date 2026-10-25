@@ -52,8 +52,8 @@ class Probe:
         self.all_text = b""
         probes.append(self)
 
-    def wait(self, text):
-        deadline = time.monotonic() + 5
+    def wait(self, text, timeout=5):
+        deadline = time.monotonic() + timeout
         while text not in self.screen:
             assert time.monotonic() < deadline, (text, self.screen)
             if select.select([self.master], [], [], 0.1)[0]:
@@ -103,7 +103,7 @@ class Probe:
         assert bytes.fromhex(output.decode().strip()) == expected
 
 
-for confirmation, code in [(b"SIGN\r", 0), (b"yes\r", 2), (b"\x1b", 2)]:
+for confirmation, code in [(b"SIGN\r", 0), (b"SiGN\r", 0), (b" sign \r", 0), (b"\x1b", 2)]:
     p = Probe(rows=13)
     p.wait(b"Page 1/4")
     p.send(b"SIGN\r")  # Cannot approve on a review page.
@@ -182,6 +182,62 @@ p.finish(3)
 pipe = subprocess.run([sys.argv[1]], input=b"nSIGN\n", capture_output=True, timeout=5)
 assert pipe.returncode == 3 and b"Input must be a terminal" in pipe.stderr
 print("PASS: tty-only input, full review traversal, explicit consent, queued-input rejection, cancellation, resize and masked ASCII entry")
+
+for rows, columns in ((12, 40), (24, 80)):
+    for mode, keyword, accepted, cancelled in (("workflow-one", b"SIGN", b"EMPTY SIGNED", b"EMPTY CANCELLED"),
+                                                ("workflow-replace", b"REGISTER", b"REPLACED", b"KEPT")):
+        for cancel in (False, True):
+            p = Probe(mode, rows=rows, columns=columns)
+            while True:
+                p.wait(b"Esc:")
+                last = p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+                p.send(b"\r")
+                if b"Enter: continue" in last:
+                    break
+            p.wait(b"Type " + keyword + b" then Enter: ")
+            marker = b"Check the destinations," if keyword == b"SIGN" else b"Check the spending rules"
+            reviews = p.all_text.count(marker)
+            assert reviews, "Required review context was not shown"
+            for invalid in (b"", b" ", b"yes", keyword[:-1], keyword + b"x", b"SING" if keyword == b"SIGN" else b"REGSITER"):
+                # A queued correction must not approve after invalid input.
+                p.send(invalid + b"\r" + keyword + b"\r")
+                p.wait(b"Not confirmed.")
+                p.wait(b"Type " + keyword + b" then Enter: ")
+                assert p.process.poll() is None, "Invalid or queued confirmation approved/abandoned the request"
+                assert (b"Nothing signed." if keyword == b"SIGN" else b"Nothing approved.") in p.all_text
+            p.send(keyword + b" " * 33 + b"\r" + keyword + b"\r")
+            p.wait(b"This entry is too long.")
+            p.wait(b"Type " + keyword + b" then Enter: ")
+            assert p.process.poll() is None, "An overlong keyword was truncated into approval"
+            mixed = b"sIgN" if keyword == b"SIGN" else b"rEgIsTeR"
+            p.send(b"\x1b" if cancel else b"  " + mixed + b"  \r")
+            output, _ = p.finish(0)
+            assert (cancelled if cancel else accepted) in output
+            assert p.all_text.count(marker) == reviews, "Correction restarted the required review"
+print("PASS: case/outer-space tolerant consent, visible typo feedback, correction without rescanning, fresh Enter and unchanged state on cancel")
+
+for rows, columns in ((12, 40), (24, 80)):
+    for mode, status, title in (("invalid", 2, b"Request rejected"), ("network", 4, b"Wrong Bitcoin network"),
+                                ("unsupported", 5, b"Unsupported request")):
+        p = Probe("qr-failure-" + mode, rows=rows, columns=columns)
+        p.wait(title)
+        p.wait(b"Nothing has been signed")
+        for action in (b"Enter: continue", b"Enter: show QR again"):
+            while True:
+                p.wait(b"Esc:")
+                last = p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+                if action in last:
+                    break
+                p.send(b"\r")
+            p.send(b"\r" if action == b"Enter: continue" else b"\x1b")
+        output, _ = p.finish(0)
+        assert b"ERROR RESPONSE " + str(status).encode() in output
+        assert b"Type SIGN" not in p.all_text and b"Type REGISTER" not in p.all_text
+        assert b"Signed transaction" not in p.all_text and b"Registered wallet" not in p.all_text
+p = Probe("qr-failure-cancelled")
+output, _ = p.finish(0)
+assert b"ERROR RESPONSE 1" in output and b"Request rejected" not in p.all_text
+print("PASS: local command error explanations before error replies, revisitable failures, unchanged keys and distinct explicit cancellation")
 
 for columns in (40, 80, 160):
     p = Probe("menu", rows=14, columns=columns)
@@ -397,7 +453,7 @@ for mode in ("workflow-inline", "workflow-inline-text"):
     for accept_setup, sign in ((False, False), (True, False), (True, True)):
         p = Probe(mode, rows=40)
         p.enter(b"Enter: scan wallet setup", b"\r")
-        p.wait(b"Check this multisig wallet")
+        p.wait(b"Review wallet setup")
         if accept_setup:
             approve_review(p, b"REGISTER")
             p.wait(b"Review transaction")
@@ -412,12 +468,12 @@ for mode in ("workflow-inline", "workflow-inline-text"):
         assert (b"SIGNED" in output) == sign
         assert p.all_text.count(b"Wallet setup needed") == 1
         if accept_setup:
-            assert b"this won't sign the transaction yet" in p.all_text
+            assert b"You'll still review and approve each transaction before signing." in p.all_text
 
 for mode in ("workflow-preload", "workflow-preload-text"):
     for accept_setup in (False, True):
         p = Probe(mode, rows=40)
-        p.wait(b"Check this multisig wallet")
+        p.wait(b"Review wallet setup")
         if accept_setup:
             approve_review(p, b"REGISTER")
             p.wait(b"\x1b[33mLoaded wallet: Native SegWit multisig (2 of 2)")
@@ -432,7 +488,7 @@ for mode in ("workflow-preload", "workflow-preload-text"):
 
 for accept_setup, sign in ((False, False), (True, False), (True, True)):
     p = Probe("workflow-inferred", rows=40)
-    p.wait(b"Its setup was included in the transaction request.")
+    p.wait(b"The scanned transaction includes a multisig wallet setup.")
     if accept_setup:
         approve_review(p, b"REGISTER")
         p.wait(b"Review transaction")
@@ -440,7 +496,7 @@ for accept_setup, sign in ((False, False), (True, False), (True, True)):
             approve_review(p)
         else:
             p.enter(b"Esc: Cancel", b"\x1b")
-        assert b"this won't sign the transaction yet" in p.all_text
+        assert b"You'll still review and approve each transaction before signing." in p.all_text
     else:
         p.enter(b"Esc: Cancel", b"\x1b")
     output, _ = p.finish(0)
@@ -457,7 +513,7 @@ assert b"EMPTY CANCELLED" in output and b"Wallet setup needed" not in p.all_text
 for mode in ("workflow-replace", "workflow-replace-text"):
     for replace in (False, True):
         p = Probe(mode, rows=40)
-        p.wait(b"This will replace the loaded multisig wallet.")
+        p.wait(b"Switch wallet setup")
         if replace:
             approve_review(p, b"REGISTER")
         else:
@@ -467,35 +523,229 @@ for mode in ("workflow-replace", "workflow-replace-text"):
 
 p = Probe("workflow-replace-invalid-text", rows=40)
 output, _ = p.finish(0)
-assert b"KEPT" in output and b"Check this multisig wallet" not in p.all_text
+assert b"KEPT" in output and b"Switch wallet setup" not in p.all_text
 
-for stop in ("warning", "review", "sign"):
-    p = Probe("workflow-fee", rows=40)
-    p.wait(b"Wallet apps such as Sparrow")
-    p.wait(b"Enter: continue to review")
-    assert b"\x1b[0;31;40mFee not fully verified" in p.all_text
-    if stop == "warning":
-        p.send(b"\x1b")
-    else:
-        p.send(b"n")  # Navigation alone must not consent on the warning's last page.
-        time.sleep(0.03)
-        assert p.process.poll() is None and b"Unverified fee:" not in p.all_text
-        p.send(b"\r")
-        p.wait(b"Unverified fee:")
+for columns in (40, 80):
+    for mode in ("workflow-fee", "workflow-change-fee"):
+        for dismiss in (b"\x1b", b"\r", b"SIGN\r"):
+            p = Probe(mode, rows=16, columns=columns)
+            p.wait(b"Could not complete this step")
+            while True:
+                p.wait(b"Esc:")
+                last = p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+                if b"Enter: continue" in last:
+                    if dismiss == b"SIGN\r":
+                        p.send(b"SIGN")
+                        p.wait(b"Esc:")  # The notice ignores text and flushes queued keys on redraw.
+                        assert p.process.poll() is None and b"Type SIGN" not in p.all_text
+                        p.send(b"\r")
+                    else:
+                        p.send(dismiss)
+                    break
+                p.send(b"\r")
+            output, _ = p.finish(0)
+            rendered = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", p.all_text)
+            assert b"\x1b[0;31;40mCannot verify transaction fee." in p.all_text
+            assert b"github.com/bitcoinerlab/thunderden/blob/master/docs/SPARROW.md#cannot-verify-transaction-fee" in rendered
+            assert b"BLOCKED" in output and b"SIGNED" not in output
+            assert b"Type SIGN" not in p.all_text and b"Review transaction" not in p.all_text
+            assert b"continue to review" not in p.all_text
+print("PASS: automatic signing, chooser/back, inline setup, atomic replacement and blocking fee errors on narrow/wide screens")
+
+for columns in (40, 80):
+    for stop in ("review", "confirmation", "sign"):
+        p = Probe("workflow-change", rows=16, columns=columns)
+        title = b"Review - high change index"
+        p.wait(b"\x1b[0;31;40m" + title)
         if stop == "review":
-            p.enter(b"Esc: Cancel", b"\x1b")
+            p.enter(b"Esc:", b"\x1b")
         else:
-            p.enter(b"Esc: Cancel", b"d")
-            p.wait(b"Wallet ID:")
-            p.enter(b"Esc: Cancel", b"d")
-            p.wait(b"Unverified fee:")
-            approve_review(p)
-            p.enter(b"Esc: Finish", b"\x1b")
-            assert len(re.findall(rb"\x1b\[0;31;40m(?:Review - |Signed - )?[Ff]ee not fully verified", p.all_text)) >= 5
-            assert b"The fee uses unverified input amounts." in p.all_text
+            while True:
+                p.wait(b"Esc:")
+                last = p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+                assert b"\x1b[0;31;40m" + title in last, "Recovery warning lost its red review heading"
+                assert b"Type SIGN" not in p.all_text, "Approval appeared before completing mandatory review"
+                p.send(b"\r")
+                if b"Enter: continue" in last:
+                    break
+            p.wait(b"Type SIGN then Enter: ")
+            assert b"Change address index: 1000000000" in p.all_text
+            assert b"WARNING: Unusually high change index." in p.all_text
+            confirmation = b" ".join(p.rows().values())
+            assert b"miss" in confirmation and b"recovery" in confirmation, "Final confirmation lost the recovery risk"
+            assert b"Unverified fee:" not in p.all_text and b"unverified input amounts" not in confirmation
+            p.send(b"SING\rSIGN\r")
+            p.wait(b"Not confirmed.")
+            p.wait(b"Type SIGN then Enter: ")
+            assert p.process.poll() is None, "Queued correction approved a high-change transaction"
+            confirmation = b" ".join(p.rows().values())
+            assert b"miss" in confirmation and b"recovery" in confirmation, "Correction hid the recovery warning"
+            p.send(b"SIGN" + b" " * 33 + b"\rSIGN\r")
+            p.wait(b"This entry is too long.")
+            p.wait(b"Type SIGN then Enter: ")
+            assert p.process.poll() is None, "An overlong correction approved a high-change transaction"
+            confirmation = b" ".join(p.rows().values())
+            assert b"miss" in confirmation and b"recovery" in confirmation, "Overlong input hid the recovery warning"
+            p.send(b"SIGN\r" if stop == "sign" else b"\x1b")
+            if stop == "sign":
+                p.wait(b"\x1b[0;31;40mSigned - high change index")
+                p.enter(b"Esc:", b"\x1b")
+        output, _ = p.finish(0)
+        assert (b"EMPTY SIGNED" in output) == (stop == "sign")
+        if stop != "review":
+            address = re.search(rb"CHANGE (\S+)", output)[1]
+            rendered = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", p.all_text)
+            assert address in rendered, "Mandatory review did not display the full high-index address"
+print("PASS: high-index change warning, full address, typed approval and cancellation on narrow/wide screens")
+
+
+def address_action(p, action, key=b"\r"):
+    # Compact screens page required context before showing a menu/confirmation.
+    while True:
+        p.wait(b"Esc:")
+        last = p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+        if action in last:
+            p.send(key)
+            return
+        assert b"Press Enter" in last, (action, last)
+        p.send(b"\r")
+
+
+def address_number(p, prompt=b"Account number [0]: ", value=b"\r"):
+    while True:
+        p.wait(b"Esc:")
+        if b"Enter: Continue" in p.all_text.rsplit(b"\x1b[2J", 1)[-1]:
+            break
+        p.send(b"\r")
+    p.wait(prompt)
+    p.spaced(prompt.rstrip())
+    if prompt.startswith(b"Account"):
+        assert b"Most wallets use account 0." in b" ".join(p.rows().values()), "Account help disappeared from the input screen"
+        p.spaced(b"Most wallets use account 0.")
+    p.send(value)
+
+
+def finish_address(p):
+    p.wait(b"Address verified")
+    while True:
+        p.wait(b"Esc:")
+        last = p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+        p.send(b"\r")
+        if b"Enter: finish" in last:
+            break
     output, _ = p.finish(0)
-    assert (b"SIGNED" in output) == (stop == "sign")
-print("PASS: automatic signing, chooser/back, inline setup, atomic replacement and persistent fee-warning consent")
+    address = re.search(rb"EXPECTED (\S+)", output)[1]
+    rendered = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", p.all_text)
+    assert address in rendered and b"Before sending," in rendered, "Verified address was truncated or comparison instruction missing"
+    assert b"CHECK FINISHED" in output and b"Type SIGN" not in p.all_text
+    assert b"amount=0.1" not in p.all_text and b"Public%20test" not in p.all_text, "Payment URI text was treated as review data"
+
+
+for rows, columns in ((12, 40), (24, 80)):
+    for mode, branch in (("address-single", b"Receiving"), ("address-change", b"Change"), ("address-incompatible", b"Receiving")):
+        p = Probe(mode, rows=rows, columns=columns)
+        address_number(p)
+        finish_address(p)
+        assert branch + b" address number: 7" in p.all_text and b"Which wallet" not in p.all_text
+        assert b"Single-signature" not in p.all_text, "Ordinary address checks exposed an unnecessary wallet-type choice"
+
+p = Probe("address-single")
+address_number(p, value=b"abc\r")
+p.wait(b"Enter a number from 0 to 100.")
+address_number(p, value=b"101\r")
+p.wait(b"Enter a number from 0 to 100.")
+address_number(p)
+finish_address(p)
+
+for mode, action in (("address-account", b"2"), ("address-late", b"1"), ("address-high", b"3")):
+    p = Probe(mode, rows=16, columns=40)
+    address_number(p)
+    p.wait(b"No match found")
+    address_action(p, b"Enter/1-3: Select", action)
+    assert p.all_text.count(b"0-999") == 1, "Search range was hidden or repeated"
+    if mode == "address-account":
+        address_number(p, value=b"7\r")
+    elif mode == "address-high":
+        address_number(p, b"Address number [0]: ", b"2147483648\r")
+        p.wait(b"Enter a number from 0 to 2147483647.")
+        address_number(p, b"Address number [0]: ", b"2147483647\r")
+    finish_address(p)
+    assert b"No match in all" not in p.all_text
+
+for rows, columns in ((12, 40), (24, 80)):
+    p = Probe("address-wrong", rows=rows, columns=columns)
+    address_number(p)
+    p.wait(b"No match found")
+    address_action(p, b"Enter/1-3: Select", b"3")
+    assert p.all_text.count(b"0-999") == 1, "Compact search result lost or duplicated the checked range"
+    address_number(p, b"Address number [0]: ", b"7\r")
+    p.wait(b"No match found")
+    address_action(p, b"Enter/1-3: Select", b"\x1b")
+    p.finish(2)
+    assert b"number 7." in p.all_text and b"7-7" not in p.all_text
+    assert b"Address verified" not in p.all_text and b"Wallet setup needed" not in p.all_text
+
+for mode in ("address-multisig", "address-multisig-change"):
+    p = Probe(mode, rows=12, columns=40)
+    address_action(p, b"Enter: verify address")
+    finish_address(p)
+    assert b"Account number [0]" not in p.all_text and b"Type REGISTER" not in p.all_text
+    assert (b"Change" if mode.endswith("change") else b"Receiving") + b" address number: 7" in p.all_text
+
+for rows, columns in ((12, 40), (24, 80)):
+    for mode, choice in (("address-ambiguous", b"1"), ("address-ambiguous-single", b"2")):
+        p = Probe(mode, rows=rows, columns=columns)
+        p.wait(b"Which wallet should we verify against?")
+        p.enter(b"Enter/1-2: Select", choice)
+        if choice == b"2":
+            address_number(p)
+        finish_address(p)
+
+p = Probe("address-unloaded")
+p.wait(b"Wallet setup needed")
+address_action(p, b"Enter: go back")
+p.finish(0)
+assert b"Checking address number" not in p.all_text
+p = Probe("address-unapproved")
+_, error = p.finish(3)
+assert b"not approved for this seed" in error and b"Address verified" not in p.all_text
+
+# Twenty-key public fixture makes the search long enough to observe incremental
+# updates. It exercises the same synchronous search used on the device.
+for resize in (False, True):
+    p = Probe("address-progress", rows=16, columns=40)
+    address_action(p, b"Enter: verify address")
+    p.wait(b"Checking address number:")
+    start = p.all_text.rfind(b"\x1b[2J")
+    p.wait(b"\x1b[13;30H")
+    if resize:
+        fcntl.ioctl(p.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 16, 80, 0, 0))
+        _, error = p.finish(3)
+        assert b"screen changed" in error
+        continue
+    p.wait(b"\x1b[13;30H")
+    p.send(b"\x1b")
+    p.wait(b"Address check paused")
+    search = p.all_text[start:].rsplit(b"\x1b[2J", 1)[0]
+    assert search.count(b"\x1b[2J") == 1 and search.count(b"Receiving and change addresses") == 1, "Search repainted fixed text"
+    numbers = [int(n) for n in re.findall(rb"\x1b\[13;30H *(\d+)", search)]
+    assert len(numbers) >= 2 and numbers[0] == 0 and numbers[-1] > 0, "Index did not advance in place"
+    address_action(p, b"Enter/1-2: Select", b"2")
+    address_number(p, b"Address number [0]: ", b"\x1b")
+    p.wait(b"Address check paused")
+    address_action(p, b"Enter/1-2: Select", b"1")
+    p.wait(b"Checking address number:")
+    p.wait(b"\x1b[13;30H")
+    p.send(b"\x1b")
+    p.wait(b"Address check paused")
+    resumed = [int(n) for n in re.findall(rb"\x1b\[13;30H *(\d+)", p.all_text)]
+    assert resumed[-1] >= numbers[-1], "Resume reset the address search"
+    address_action(p, b"Enter/1-2: Select", b"q")
+    # Menu cancellation is Esc/Ctrl-C, not arbitrary text; a fresh non-cancel key
+    # above releases the held-Escape latch before leaving the stopped menu.
+    p.send(b"\x1b")
+    p.finish(2)
+print("PASS: address account selection, both branches, multisig, ambiguity, bounded search, exact indices and non-flickering stop/resume")
 
 MNEMONIC = ["abandon"] * 11 + ["about"]
 
@@ -505,6 +755,8 @@ def word(p, index, count, value):
 
 
 def mnemonic(p, words, choice=b"\r"):
+    if p.controlling:
+        p.enter(b"Enter/1-4: Select", b"2")
     p.enter(b"1: 12 words", choice)
     for index, value in enumerate(words, 1):
         word(p, index, len(words), value)
@@ -524,13 +776,497 @@ def export_review(p):
         p.send(b"\r")
 
 
+for rows, columns in ((12, 40), (24, 80)):
+    for cancelled_scan in (False, True):
+        p = Probe("seed-standard", rows=rows, columns=columns)
+        if cancelled_scan:
+            p.enter(b"Enter/1-4: Select", b"1")
+            address_action(p, b"Enter: continue", b"\x1b")
+        p.enter(b"Enter/1-4: Select", b"4")
+        output, _ = p.finish(0)
+        assert b"CHANGE NETWORK SCANS " + (b"1" if cancelled_scan else b"0") in output
+        assert b"Passphrase: " not in p.all_text and b"Private recovery backup" not in p.all_text
+
+for mode in ("seed-standard", "seed-compact"):
+    for rows, columns in ((12, 40), (24, 80)):
+        p = Probe(mode, rows=rows, columns=columns)
+        p.enter(b"Enter/1-4: Select", b"1")
+        p.wait(b"Recovery words scanned")
+        address_action(p, b"S: Show words/QR", b"s")
+        assert b"abandon" not in p.all_text and b"Private recovery backup" not in p.all_text
+        for attempt in range(2):
+            p.wait(b"Private recovery backup")
+            p.wait(b"3. abandon" if rows == 12 else b"12. about")
+            assert b"Passphrase: " not in p.all_text and b"Check your backup" not in p.all_text
+            p.send(b"\r" if attempt and rows == 24 else b"\x1b")
+            p.wait(b"Recovery words scanned")
+            p.wait(b"S: Show words/QR")
+            last = p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+            assert b"abandon" not in last and b"about" not in last
+            assert b"Make sure your screen is private" not in p.all_text
+            if not attempt:
+                for _ in range(4):
+                    p.send(b"\x1b")
+                    time.sleep(0.02)
+                assert p.process.poll() is None and b"Passphrase: " not in p.all_text
+                p.send(b"S")
+        p.send(b"\r")
+        address_number(p, b"Passphrase: ")
+        output, _ = p.finish(0)
+        assert b"LOADED 73c5da0a SCANS 1" in output
+
+for choice, count, last in ((1, 12, "about"), (2, 15, "address"), (3, 18, "agent"), (4, 21, "admit"), (5, 24, "art")):
+    p = Probe("seed-typed")
+    p.enter(b"Enter/1-4: Select", b"2")
+    p.enter(b"1: 12 words", str(choice).encode())
+    for index in range(1, count):
+        word(p, index, count, "abandon")
+    # A Show key queued with the final word must not expose the validated phrase.
+    p.enter(f"Word {count} of {count}: ".encode(), last.encode() + b"\rS")
+    p.wait(b"Recovery words entered")
+    label = b"S: Show words/QR" if count in (12, 24) else b"S: Show words"
+    p.wait(label)
+    assert b"abandon" not in p.all_text and b"Private recovery backup" not in p.all_text
+    p.send(b"s")
+    p.wait(b"Private recovery backup")
+    p.wait(b"3. abandon")
+    if count not in (12, 24):
+        p.wait(b"Seed QR supports 12 or 24 words.")
+        assert b"Q: Seed QR" not in p.all_text
+    p.send(b"\x1b")
+    p.wait(b"Recovery words entered")
+    p.wait(label)
+    p.send(b"\r")
+    p.enter(b"Passphrase: ", b"\r")
+    output, _ = p.finish(0)
+    assert output.startswith(b"LOADED ") and b"SCANS 0" in output
+    assert b"Check your backup" not in p.all_text
+print("PASS: optional typed/scanned backup views, Show words/QR label, no default/queued disclosure, hide/back and all import lengths")
+
+
+for mode in ("seed-standard", "seed-compact"):
+    p = Probe(mode)
+    p.wait(b"3: Create a new wallet")
+    assert b"Share a public key" not in p.all_text
+    p.send(b"1")
+    p.wait(b"Recovery words scanned")
+    address_action(p, b"Enter: continue", b"d")
+    p.wait(b"Format: " + (b"CompactSeedQR" if mode == "seed-compact" else b"Standard SeedQR"))
+    address_action(p, b"Enter: continue", b"d")
+    address_action(p, b"Enter: continue")
+    p.enter(b"Passphrase: ", b"\r")
+    output, _ = p.finish(0)
+    assert b"LOADED 73c5da0a SCANS 1" in output and b"abandon" not in p.all_text
+    assert b"Nothing is signed" not in p.all_text
+
+for mode, reason in (("seed-wrong", b"This isn't a seed QR."), ("seed-invalid", b"Invalid mnemonic checksum")):
+    p = Probe(mode)
+    p.enter(b"3: Create a new wallet", b"1")
+    p.wait(reason)
+    address_action(p, b"Enter: continue")
+    assert b"Passphrase: " not in p.all_text
+    p.enter(b"3: Create a new wallet", b"1")
+    address_action(p, b"Enter: continue", b"\x1b")
+    p.enter(b"3: Create a new wallet", b"1")
+    address_action(p, b"Enter: continue")
+    p.enter(b"Passphrase: ", b"TREZOR\r")
+    p.enter(b"Repeat passphrase: ", b"TREZOR\r")
+    output, _ = p.finish(0)
+    assert b"LOADED b4e3f5ed SCANS 3" in output and b"TREZOR" not in p.all_text
+
+for rows, columns in ((12, 40), (24, 80)):
+    p = Probe("seed-menu", rows=rows, columns=columns)
+    p.wait(b"Seed fingerprint: 73c5da0a")
+    p.wait(b"Loaded wallet: Family multisig")
+    p.wait(b"Enter/1-3: Select")
+    p.spaced(b"Seed fingerprint:")
+    assert b"1: Scan a QR code" in p.all_text and b"2: Share a public key" in p.all_text
+    assert b"Regtest" in p.all_text
+    if columns == 80:
+        assert b"Scan an address, transaction or request from your wallet app." in p.all_text
+    p.send(b"\x1b[B")
+    p.wait(b"> 2: Share a public key")
+    p.send(b"\x1b[B")
+    p.wait(b"> 3: End session")
+    assert p.rows()[5 if rows == 12 else 6].startswith(b"Seed fingerprint:"), "Scrolling hid the seed identity"
+    p.send(b"\r")
+    p.finish(0)
+    for key, expected in ((b"\r", b"KEPT SESSION"), (b"2", b"END SESSION"), (b"\x1b", None)):
+        p = Probe("seed-loaded", rows=rows, columns=columns)
+        address_action(p, b"Enter/1-2: Select", key)
+        output, _ = p.finish(2 if expected is None else 0)
+        if expected:
+            assert expected in output
+        assert b"Passphrase: " not in p.all_text and b"Recovery words scanned" not in p.all_text
+
+p = Probe("seed-nested")
+p.wait(b"Scan the multisig wallet setup instead.")
+address_action(p, b"Enter: continue")
+output, _ = p.finish(0)
+assert b"NO SESSION CHANGE" in output and b"End session and scan" not in p.all_text
+print("PASS: seed-first scan/confirmation/passphrase, failed/cancelled imports, fingerprint spacing and explicit session-end choices")
+
+
+for mode, entered, expected in (
+        ("entropy-coins", b"h" * 149 + b"t\x7fhT", bytes(150)),
+        ("entropy-coins", b"yY" + b"hHtT" * 37 + b"hThH", bytes([0,0,1,1]) * 37 + bytes([0,1])),
+        ("entropy-dice", b"07" + b"6" * 63 + b"5\x7f1", bytes([5] * 63 + [0]))):
+    p = Probe(mode, rows=12, columns=40)
+    address_action(p, b"Enter: start collecting")
+    p.wait(b"Tosses entered:" if mode != "entropy-dice" else b"Rolls entered:")
+    if mode == "entropy-coins":
+        assert b"H: Heads   T: Tails" in p.all_text, "Coin labels do not match the input keys"
+    p.send(entered)
+    p.wait(b"Enter: Continue")
+    assert p.process.poll() is None, "Reaching the manual target skipped confirmation"
+    p.send(b"\r")
+    output, _ = p.finish(0)
+    assert bytes.fromhex(output.decode().strip()) == expected
+
+
+def start_generation(p, words=12, camera=False):
+    address_action(p, b"Enter/1-2: Select", b"1" if words == 12 else b"2")
+    address_action(p, b"Enter: continue")
+    address_action(p, b"Enter/1-2: Select", b"\r" if camera else b"2")
+    assert b"> 1: Use camera" in p.all_text and b"2: Skip camera" in p.all_text
+    if not camera:
+        address_action(p, b"Enter/1-3: Select")
+
+
+def start_camera(p):
+    address_action(p, b"Enter: start")
+    assert b"Add coin tosses or dice rolls?" not in p.all_text, "Manual-source selection interrupted the camera flow"
+    assert b"Once collection finishes" not in p.all_text, "Camera introduction instructs users to stop the checks"
+    p.spaced(b"Press Enter to start.")
+    rows = p.rows()
+    action_row, = [row for row, text in rows.items() if text.startswith(b"Press Enter to start.")]
+    preceding = b" ".join(text for row, text in sorted(rows.items()) if row < action_row - 1)
+    assert b" ".join(preceding.split()).endswith(b"A still scene is fine; movement is not required."), rows
+
+
+def copy_backup(p):
+    while True:
+        p.wait(b"Copy every word in order.")
+        last = p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+        p.send(b"\r")
+        if b"Enter: Check backup" in last:
+            break
+    found = re.findall(rb"\x1b\[\d+;\d+H(\d+)\. ([a-z]+)", p.all_text)
+    return [value.decode() for _, value in sorted({int(index): value for index, value in found}.items())]
+
+
+for rows, columns in ((12, 40), (24, 80)):
+    p = Probe("entropy-generate", rows=rows, columns=columns)
+    address_action(p, b"Enter/1-2: Select", b"\x1b[B")
+    p.enter(b"> 2: 24 words", b"D\r" if columns == 40 else b"d\r")
+    address_action(p, b"Enter: return to choices", b"\r\r")
+    p.wait(b"> 2: 24 words")
+    assert b"How your recovery words are created" not in p.all_text, "Details or queued Enter selected a word count"
+    assert b"128 bits" in p.all_text and b"256 bits" in p.all_text
+    p.enter(b"Esc: Back", b"\x1b")
+    p.finish(2)
+
+for count, rows, columns in ((12, 12, 40), (24, 24, 80)):
+    p = Probe("entropy-generate", rows=rows, columns=columns)
+    start_generation(p, count)
+    rendered = b" ".join(re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b" ", p.all_text).split())
+    assert b"phrase even stronger" in rendered
+    assert b"Bitcoin Core's" in rendered and b"random-number generator" in rendered
+    assert b"noise from the sensor" in rendered and b"This step is optional." in rendered
+    assert (b"150 tosses" if count == 12 else b"300 tosses") in rendered
+    # The last option may be below the compact menu's viewport until selected.
+    if columns == 80:
+        assert b"128 rolls" in rendered
+    assert b"Write down your recovery words" not in p.all_text
+    address_action(p, b"Enter: generate words")
+    rendered = b" ".join(re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b" ", p.all_text).split())
+    assert b"The next screen will show" in rendered
+    assert b"no camera" in rendered and b"is pointed at it." in rendered
+    backup = copy_backup(p)
+    assert len(backup) == count
+    if count == 12:
+        core_only_backup = backup
+    address_action(p, b"Enter: enter your words")
+    if count == 12:
+        for index, value in enumerate(MNEMONIC, 1):
+            word(p, index, count, value)
+        p.wait(b"Backup did not match")
+        assert p.process.poll() is None, "Incorrect backup made the wallet available"
+        address_action(p, b"Enter: review the words")
+        assert copy_backup(p) == backup, "Retry generated different words"
+        address_action(p, b"Enter: enter your words")
+    for index, value in enumerate(backup, 1):
+        word(p, index, count, value)
+    output, _ = p.finish(0)
+    assert b"BACKUP VERIFIED" in output
+
+p = Probe("entropy-generate")
+start_generation(p)
+address_action(p, b"Enter: generate words", b"\x1b")
+output, _ = p.finish(2)
+assert b"Write down your recovery words" not in p.all_text and not output
+p = Probe("entropy-rng-fail")
+start_generation(p)
+address_action(p, b"Enter: generate words")
+output, _ = p.process.communicate(timeout=5)
+assert p.process.returncode == 91 and not output
+assert b"Write down your recovery words" not in p.all_text, "RNG failure exposed a fallback mnemonic"
+print("PASS: manual outcomes, corrections, private backup verification, cancellation and fatal RNG failure")
+
+for scenario, rows, columns in (("valid", 12, 40), ("valid", 40, 80), ("constant", 40, 80), ("frozen", 40, 80),
+                               ("bad-header", 40, 80), ("stalled-capture", 40, 80), ("stalled-exit-assessment", 40, 80), ("cancel-assessment", 40, 80),
+                               ("cancel-assessment", 12, 40), ("long-assessment", 40, 80), ("bad-progress-assessment", 40, 80)):
+    # Build-time hardlinks keep fixtures executable on the read-only test image;
+    # the writable /tmp mount deliberately remains noexec.
+    probe = Path(sys.argv[1]).resolve().parent / "entropy-fixtures" / scenario / "terminal-probe"
+    p = Probe("entropy-generate", executable=str(probe), rows=rows, columns=columns)
+    start_generation(p, camera=True)
+    start_camera(p)
+    children = Path(f"/proc/{p.process.pid}/task/{p.process.pid}/children")
+    if scenario in ("cancel-assessment", "long-assessment"):
+        p.wait(b"Esc: stop checks")
+        p.wait(b"Values: 655360/1048576 (62%)")
+        assert b"Check: 8 of 9" in p.all_text and b"Elapsed:" in p.all_text
+        assert b"Esc: Cancel" not in p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+        pids = children.read_text().split()
+        assert pids
+        if scenario == "long-assessment":
+            # Drain real tty output while waiting: a full pty must not hide a
+            # parent timeout by blocking its elapsed-time updates.
+            p.wait(b"Elapsed: 123 seconds", timeout=135)
+            assert p.process.poll() is None and children.read_text().split() == pids
+            assert b"Camera checks did not finish" not in p.all_text
+        p.send(b"\x1b")
+        p.wait(b"Camera checks stopped early")
+        address_action(p, b"Enter/1-2: Select", b"d")
+        address_action(p, b"Enter: return to choices")
+        rendered = b" ".join(re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b" ", p.all_text).split())
+        assert b"7 of 9 checks finished." in rendered
+        assert b"There is no final randomness estimate" in rendered
+        # Exclude headers, footers and page instructions between wrapped lines.
+        body = 6 if rows >= 20 else 5
+        copy = b" ".join(text for row, text in re.findall(
+            rb"\x1b\[(\d+);\d+H(?:\x1b\[[0-9;]*[mK])*([^\x1b\r\n]*)", p.all_text)
+            if body <= int(row) < rows - 2 and not text.startswith(b"Press Enter"))
+        copy = b" ".join(copy.split())
+        assert b"Fresh randomness from Bitcoin Core is used either way." in copy
+        assert b"Camera data may add useful randomness, but it never replaces or weakens Bitcoin Core's protection." in copy
+        assert b"Completed checks only." in rendered and b"Unfinished checks could lower" in rendered
+        assert b"Most Common Value (camera values):" in rendered and b"0.000000 bits per value" in rendered
+        assert b"Estimated randomness in checked data:" not in rendered
+        assert all(not Path(f"/proc/{pid}").exists() for pid in pids), "Cancelled assessment left a worker alive"
+        assert not children.read_text().strip(), "Workers survived into the stopped-checks choice"
+        if columns == 40 or scenario == "long-assessment":
+            # The safe default discards the optional camera contribution.
+            address_action(p, b"Enter/1-2: Select", b"\r")
+            address_action(p, b"Enter/1-3: Select")
+            p.wait(b"Camera readings: not included")
+            address_action(p, b"Enter: generate words", b"\x1b")
+            p.finish(2)
+        else:
+            address_action(p, b"Enter/1-2: Select", b"2")
+            address_action(p, b"Enter/1-3: Select")
+            p.wait(b"Camera readings: included (unchecked)")
+            address_action(p, b"Enter: generate words")
+            backup = copy_backup(p)
+            address_action(p, b"Enter: enter your words")
+            for index, value in enumerate(backup, 1):
+                word(p, index, 12, value)
+            output, _ = p.finish(0)
+            assert b"BACKUP VERIFIED" in output  # Probe also requires one fresh Core RNG call.
+        continue
+    if scenario == "valid":
+        p.wait(b"d: Details", timeout=130)
+        assert not children.read_text().strip(), "Workers survived into camera review"
+        address_action(p, b"Enter: use camera data", b"D" if columns == 40 else b"d")
+        summary = b" ".join(re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b" ", p.all_text).split())
+        assert b"Estimated randomness in checked data:" in summary and b"bits per camera value" in summary
+        assert b"Camera values included:" in summary
+        assert b"The randomness checks examined" not in summary, "Checked count belongs in Details"
+        assert b"Press D for details, or Enter to continue and use the camera data." in summary
+        p.wait(b"d: Summary")
+        address_action(p, b"Enter: use camera data")
+        rendered = b" ".join(re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b" ", p.all_text).split())
+        # Compact pages insert navigation text between wrapped lines.
+        assert b"The randomness checks examined" in rendered and b"1048576" in rendered
+        assert b"of the collected camera values." in rendered
+        assert b"Separate bitstring checks use at most" in rendered and b"1,000,000 bits." in rendered
+        assert b"Each camera value is an 8-bit" not in rendered
+        assert b"final strength of your recovery words" not in rendered
+        assert b"Samples hashed" not in rendered and b"Hashed / assessed" not in rendered
+        assert b"Add coin tosses or dice rolls?" not in p.all_text, "Manual sources were offered before camera review finished"
+        address_action(p, b"Enter/1-3: Select", b"3")
+        address_action(p, b"Enter: start collecting")
+        p.wait(b"Rolls entered:")
+        assert not children.read_text().strip(), "Manual input began with a worker alive"
+        p.send(b"1" * 64)
+        p.enter(b"Enter: Continue", b"\r")
+        address_action(p, b"Enter: generate words")
+        backup = copy_backup(p)
+        address_action(p, b"Enter: enter your words")
+        for index, value in enumerate(backup, 1):
+            word(p, index, 12, value)
+        output, _ = p.finish(0)
+        assert b"BACKUP VERIFIED" in output
+    else:
+        p.wait(b"Camera data cannot be used", timeout=135)
+        assert not children.read_text().strip(), "Failed camera attempt left a worker alive"
+        assert b"Use unchecked camera data" not in p.all_text, "Capture fault offered an unchecked contribution"
+        if scenario == "stalled-exit-assessment":
+            assert b"Camera collection took too long" in p.all_text
+        address_action(p, b"Enter/1-2: Select", b"1")
+        address_action(p, b"Enter/1-3: Select")
+        p.wait(b"Camera readings: not included")
+        address_action(p, b"Enter: generate words", b"\x1b")
+        p.finish(2)
+    assert b"sha256" not in p.all_text and b"commandline" not in p.all_text, "Estimator metadata leaked onto the terminal"
+print("PASS: complete and unchecked camera generation, partial-result warnings, progress, faults and manual stop beyond two minutes")
+
+# Interrupted capture is discarded before retry/skip, including when assessment
+# has already started. Neither partial data nor workers may reach generation.
+for scenario, rows, columns, retry in (("stalled-capture", 12, 40, False), ("stalled-capture", 24, 80, True),
+                                      ("partial-capture-assessment", 12, 40, True), ("partial-capture-assessment", 24, 80, False)):
+    probe = Path(sys.argv[1]).resolve().parent / "entropy-fixtures" / scenario / "terminal-probe"
+    p = Probe("entropy-generate", executable=str(probe), rows=rows, columns=columns)
+    start_generation(p, camera=True)
+    children = Path(f"/proc/{p.process.pid}/task/{p.process.pid}/children")
+    previous_pids = set()
+    for attempt in range(2 if retry else 1):
+        start_camera(p)
+        p.wait(b"Esc: stop camera")
+        p.wait(b"Values: 655360/1048576 (62%)" if scenario.startswith("partial") else b"Check: 0 of 9")
+        pids = set(children.read_text().split())
+        assert len(pids) == (2 if scenario.startswith("partial") else 1), pids
+        assert not pids & previous_pids, "Retry reused an old camera/assessment worker"
+        p.send(b"\x1b")
+        p.wait(b"Camera collection stopped")
+        assert not children.read_text().strip(), "Workers survived into the interrupted-capture choice"
+        assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+        if scenario.startswith("partial") and columns == 80:
+            for _ in range(12):
+                p.send(b"\x1b")
+                time.sleep(0.1)
+            assert p.process.poll() is None, "Held Escape cancelled wallet creation behind the stop choice"
+        if retry and not attempt:
+            previous_pids = pids
+            address_action(p, b"Enter/1-2: Select", b"2")
+    address_action(p, b"Enter/1-2: Select")
+    address_action(p, b"Enter/1-3: Select")
+    p.wait(b"Camera readings: not included")
+    assert b"Use unchecked camera data" not in p.all_text, "Incomplete capture offered an unchecked contribution"
+    assert b"Camera data cannot be used" not in p.all_text, "User stop was treated as a camera fault"
+    address_action(p, b"Enter: generate words")
+    backup = copy_backup(p)
+    assert backup == core_only_backup, "Interrupted camera samples entered the generated mnemonic"
+    address_action(p, b"Enter: enter your words")
+    for index, value in enumerate(backup, 1):
+        word(p, index, 12, value)
+    output, _ = p.finish(0)
+    assert b"BACKUP VERIFIED" in output
+
+# Cancellation is still available before capture starts and from the stop choice.
+p = Probe("entropy-generate")
+start_generation(p, camera=True)
+address_action(p, b"Enter: start", b"\x1b")
+p.finish(2)
+assert b"Camera collection stopped" not in p.all_text
+p = Probe("entropy-generate", executable=str(Path(sys.argv[1]).resolve().parent / "entropy-fixtures/stalled-capture/terminal-probe"))
+start_generation(p, camera=True)
+start_camera(p)
+p.wait(b"Check: 0 of 9")
+p.send(b"\x1b")
+p.wait(b"Camera collection stopped")
+address_action(p, b"Enter/1-2: Select", b"\x1b[B")
+p.wait(b"> 2: Try camera again")
+p.send(b"\x1b")
+p.finish(2)
+print("PASS: camera-first flow, still-scene hint, interrupted capture discard/retry, fresh workers, held Escape and mandatory Core-only generation")
+
+# Opting into unchecked camera data never permits an RNG failure fallback.
+p = Probe("entropy-rng-fail", executable=str(Path(sys.argv[1]).resolve().parent / "entropy-fixtures/cancel-assessment/terminal-probe"))
+start_generation(p, camera=True)
+start_camera(p)
+p.wait(b"Esc: stop checks")
+p.send(b"\x1b")
+address_action(p, b"Enter/1-2: Select", b"2")
+address_action(p, b"Enter/1-3: Select")
+address_action(p, b"Enter: generate words")
+output, _ = p.process.communicate(timeout=5)
+assert p.process.returncode == 91 and not output and b"Write down your recovery words" not in p.all_text
+
+
 # Exercise the actual application with a controlling tty. The test container has
 # no framebuffer; a failed display must return to the menu and preserve the seed
 # session, rather than prompt again or export through an alternate channel.
+for rows, columns in ((12, 40), (24, 80)):
+    for create in (False, True):
+        p = Probe(executable=sys.argv[2], controlling=True, rows=rows, columns=columns)
+        p.enter(b"Enter/1-5: Select", b"1")
+        if not create:
+            # A cancelled import must not retain a phrase or block changing network.
+            p.enter(b"Enter/1-4: Select", b"2")
+            p.enter(b"1: 12 words", b"\r")
+            word(p, 1, 12, "abandon")
+            p.enter(b"Word 2 of 12: ", b"\x1b")
+        route = [(b"2", b"Signet"), (b"3", b"Testnet4"), (b"4", b"Regtest"),
+                 (b"5", b"Testnet3"), (b"1", b"Bitcoin mainnet")]
+        if not create:
+            route.append((b"2", b"Signet"))
+        for choice, network in route:
+            p.wait(b"Enter/1-4: Select")
+            assert b"> 1: Scan a seed QR" in p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+            if columns == 40:
+                for label in (b"> 2: Enter recovery words", b"> 3: Create a new wallet", b"> 4: Change network"):
+                    p.send(b"\x1b[B")
+                    p.wait(label)
+                p.send(b"\r")
+            else:
+                p.send(b"4")
+            p.wait(b"Enter/1-5: Select")
+            chooser = p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+            assert b"\x1b[33m" not in chooser, "Old network label remained on the network chooser"
+            assert b"Passphrase: " not in p.all_text and b"Session ended" not in p.all_text
+            assert p.process.poll() is None, "Changing network ended the signer"
+            p.send(choice)
+            p.wait(b"\x1b[33m" + network)
+            p.wait(b"Start a session")
+        if create:
+            p.enter(b"Enter/1-4: Select", b"3")
+            start_generation(p)
+            address_action(p, b"Enter: generate words")
+            backup = copy_backup(p)
+            assert len(backup) == 12
+            address_action(p, b"Enter: enter your words")
+            for index, value in enumerate(backup, 1):
+                word(p, index, 12, value)
+        else:
+            mnemonic(p, MNEMONIC)
+            address_action(p, b"Enter: continue")
+        address_number(p, b"Passphrase: ")
+        p.wait(b"Enter/1-3: Select")
+        active = p.all_text.rsplit(b"\x1b[2J", 1)[-1]
+        assert b"Change network" not in active and b"Start a session" not in active
+        assert b"\x1b[33m" + network in active
+        p.send(b"4")  # The former pre-wallet action is not available with keys loaded.
+        public_key_export(p)
+        export_review(p)
+        assert b"Path: m/84h/" + (b"0" if create else b"1") + b"h/0h" in p.all_text
+        assert (b"xpub" if create else b"tpub") in p.all_text, "Export used the previous network"
+        p.send(b"q")
+        p.enter(b"Enter/1-3: Select", b"3")
+        p.finish(0)
+        assert p.all_text.count(b"Choose a Bitcoin network") == len(route) + 1
+print("PASS: pre-wallet network changes across all five networks, compact navigation, cancelled imports and no network changes after import/create")
+
 for choice, network, coin in [(b"\r", b"Bitcoin mainnet", 0), (b"2", b"Signet", 1)]:
     p = Probe(executable=sys.argv[2], controlling=True)
     p.enter(b"5: Legacy testnet3", choice)
     p.wait(network)
+    p.wait(b"Start a session")
+    assert b"Share a public key" not in p.all_text and b"End session" not in p.all_text
+    mnemonic(p, MNEMONIC)
+    address_action(p, b"Enter: continue")
+    p.enter(b"Passphrase: ", b"\r")
     p.enter(b"3: End session (clear keys)", b"2")
     p.enter(b"Enter a custom path (advanced)", b"8")
     p.enter(b"Path: ", b"\x1b")
@@ -548,16 +1284,16 @@ for key in (b"\x1b", b"\x03"):
         time.sleep(0.02)
     assert p.process.poll() is None, "Cancel key ended network selection"
 p.send(b"4")
+mnemonic(p, ["abandon"] * 12)
+p.wait(b"These words do not make a valid recovery phrase.")
+assert b"Passphrase: " not in p.all_text, "Passphrase requested before mnemonic validation"
+for index, value in enumerate(MNEMONIC, 1):
+    word(p, index, 12, value)
+address_action(p, b"Enter: continue")
+p.enter(b"Passphrase: ", b"\r")
 for attempt in range(2):
     p.wait(b"3: End session (clear keys)")
     public_key_export(p)
-    if attempt == 0:
-        mnemonic(p, ["abandon"] * 12)
-        p.wait(b"These words do not make a valid recovery phrase.")
-        assert b"Passphrase: " not in p.all_text, "Passphrase requested before mnemonic validation"
-        for index, value in enumerate(MNEMONIC, 1):
-            word(p, index, 12, value)
-        p.enter(b"Passphrase: ", b"\r")
     export_review(p)
     p.spaced(b"Press Enter to show the QR code.")
     assert b"Repeat passphrase: " not in p.all_text, "Empty passphrase required confirmation"
@@ -720,9 +1456,8 @@ print("PASS: hidden recovery words, opt-in visibility, rejected replacements, ov
 # A mistyped passphrase can be retried without entering the words again.
 p = Probe(executable=sys.argv[2], controlling=True, rows=24)
 p.enter(b"5: Legacy testnet3", b"4")
-p.wait(b"3: End session (clear keys)")
-public_key_export(p)
 mnemonic(p, MNEMONIC)
+address_action(p, b"Enter: continue")
 p.enter(b"Passphrase: ", b" A Case  \r")
 p.enter(b"Repeat passphrase: ", b" A Case\r")
 p.wait(b"Press Enter to continue.")
@@ -747,6 +1482,8 @@ p.wait(b"Repeat passphrase: ")
 p.spaced(b"Repeat passphrase:")
 confirmation_start = len(p.all_text)
 p.send(b" A Case  \r")
+p.wait(b"3: End session (clear keys)")
+public_key_export(p)
 export_review(p)
 p.send(b"q")
 p.wait(b"3: End session (clear keys)")
@@ -779,12 +1516,13 @@ with tempfile.TemporaryDirectory() as temporary:
         pids.append(pid)
         p.send(network)
         p.wait(b"Regtest" if network == b"4" else b"Testnet4")
-        p.wait(b"3: End session (clear keys)")
-        public_key_export(p)
         mnemonic(p, words)
+        address_action(p, b"Enter: continue")
         p.enter(b"Passphrase: ", passphrase + b"\r")
         if passphrase:
             p.enter(b"Repeat passphrase: ", passphrase + b"\r")
+        p.wait(b"3: End session (clear keys)")
+        public_key_export(p)
         export_review(p)
         fingerprints.append(re.findall(rb"Master fingerprint: ([0-9a-f]{8})", p.all_text)[-1])
         p.send(b"q")

@@ -1,5 +1,12 @@
 #include "terminal.h"
+#include "address_check.h"
+#include "entropy.h"
+#include "entropy_rng.h"
+#include "seed_qr.h"
+#include "qr_commands.h"
+#include "cbor.h"
 #include "multisig_fixture.h"
+#include <key_io.h>
 #include <util/strencodings.h>
 #include <unistd.h>
 #include <cstdio>
@@ -9,6 +16,117 @@ int main(int argc, char** argv)
 {
     try {
         td::Terminal terminal(dup(STDIN_FILENO));
+        if (argc == 2 && std::string_view(argv[1]).starts_with("qr-failure-")) {
+            const std::string_view mode(argv[1]);
+            ECC_Context context; SelectParams(ChainType::REGTEST); terminal.SetNetwork("Regtest");
+            td::Keys keys(fixture::Bytes(fixture::WORDS), {});
+            const auto fingerprint = keys.RootFingerprint();
+            const bool cancelled = mode == "qr-failure-cancelled";
+            td::CborWriter request;
+            request.Array(5); request.UInt(3); request.Bytes(std::array<uint8_t, 16>{});
+            request.Text(mode == "qr-failure-network" ? "main" : "regtest");
+            request.UInt(mode == "qr-failure-unsupported" ? 99 : cancelled ? 1 : 0);
+            if (cancelled) { request.Array(2); request.Array(0); request.UInt(0); }
+            else { request.Array(1); request.UInt(0); } // GET_INFO requires an empty array.
+            unsigned approvals = 0;
+            const auto reply = td::HandleQRRequest({"bytes", td::CborBytes(request.data)}, keys,
+                {[&](const auto&) { ++approvals; return false; }, {}, {}, {}});
+            if (const auto review = td::QRFailureReview(reply.status)) {
+                terminal.Notice(review->title, review->summary);
+                terminal.Revisit(*review); // The same explanation remains available from the error QR.
+            }
+            td::Require(keys.RootFingerprint() == fingerprint && approvals == unsigned(cancelled), "Error handling changed keys or requested approval");
+            std::printf("ERROR RESPONSE %u\n", reply.status);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]).starts_with("seed-")) {
+            const std::string_view mode(argv[1]);
+            ECC_Context context; SelectParams(ChainType::REGTEST); terminal.SetNetwork("Regtest");
+            const auto words = td::EntropyMnemonic(td::SecretBytes(16));
+            const td::QRMessage message{mode == "seed-compact" ? "compact-seedqr" : "seedqr", {},
+                td::EncodeSeedQR(words, mode == "seed-compact" ? td::SeedQRFormat::Compact : td::SeedQRFormat::Standard)};
+            if (mode == "seed-loaded") {
+                td::Keys keys(words, {}), bob(words, fixture::Bytes("cosigner"));
+                auto policy = td::ImportMultisig(fixture::Setup(2, 2, {&keys, &bob}, {fixture::Path(2), fixture::Path(2, 7)}));
+                std::optional<td::ApprovedWallet> loaded(td::ApprovedWallet{policy, keys.RegistrationTag(policy.ID())});
+                const auto fingerprint = keys.RootFingerprint();
+                const bool end = td::EndSessionForSeed(terminal, message);
+                td::Require(keys.RootFingerprint() == fingerprint && loaded->policy.ID() == policy.ID()
+                    && keys.VerifyTag(policy.ID(), loaded->proof), "Seed scan changed the current session");
+                std::puts(end ? "END SESSION" : "KEPT SESSION");
+            } else if (mode == "seed-nested") {
+                td::Keys keys(words, {});
+                std::optional<td::ApprovedWallet> loaded;
+                try { td::LoadWallet(terminal, keys, loaded, message); throw std::runtime_error("Seed was accepted as setup"); }
+                catch (const std::invalid_argument& error) { terminal.Notice("Wrong QR type", {error.what()}); }
+                td::Require(!loaded, "Seed installed a wallet setup");
+                std::puts("NO SESSION CHANGE");
+            } else if (mode == "seed-menu") {
+                terminal.Menu("What would you like to do?", {"Scan a QR code", "Share a public key (xpub)", "End session (clear keys)"},
+                    "Scan an address, transaction or request from your wallet app.", false, {}, false, {},
+                    {"Seed fingerprint: 73c5da0a", "Loaded wallet: Family multisig"});
+            } else {
+                unsigned scans = 0;
+                const auto keys = td::StartSession(terminal, [&] {
+                    ++scans;
+                    if (mode == "seed-wrong" && scans == 1) return td::QRMessage{"address", td::CborBytes(fixture::Bytes("public fixture"))};
+                    if (mode == "seed-invalid" && scans == 1) return td::QRMessage{"seedqr", {}, td::SecretBytes(48, '0')};
+                    return message;
+                });
+                if (keys) std::printf("LOADED %s SCANS %u\n", HexStr(keys->RootFingerprint()).c_str(), scans);
+                else std::printf("CHANGE NETWORK SCANS %u\n", scans);
+            }
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]).starts_with("entropy-")) {
+            const std::string_view mode(argv[1]);
+            if (mode == "entropy-generate" || mode == "entropy-rng-fail") {
+                mock_entropy_rng = true; fail_entropy_rng = mode == "entropy-rng-fail";
+                const auto mnemonic = td::NewMnemonic(terminal);
+                td::ValidateMnemonic(mnemonic);
+                td::Require(entropy_rng_calls == 1, "Generation did not request fresh randomness exactly once");
+                std::puts("BACKUP VERIFIED");
+            } else {
+                const auto source = mode == "entropy-dice" ? td::ManualSource::Dice : td::ManualSource::Coins;
+                const auto samples = terminal.ManualEntropy(source, 12);
+                std::puts(HexStr(samples).c_str()); // Public test inputs only.
+            }
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]).starts_with("address-")) {
+            const std::string mode(argv[1]);
+            ECC_Context context; SelectParams(ChainType::REGTEST); terminal.SetNetwork("Regtest");
+            td::Keys keys(fixture::Bytes(fixture::WORDS), {}), other(fixture::Bytes(fixture::WORDS), fixture::Bytes("cosigner"));
+            const unsigned purpose = mode == "address-ambiguous-single" ? 49 : 84;
+            auto policy = td::DefaultPolicy(mode == "address-wrong" ? other : keys, purpose, mode == "address-account" ? 7 : 0);
+            std::optional<td::ApprovedWallet> loaded;
+            if (mode.find("multisig") != mode.npos || mode.find("ambiguous") != mode.npos || mode == "address-unloaded"
+                || mode == "address-unapproved" || mode == "address-progress" || mode == "address-incompatible") {
+                const unsigned kind = mode.find("ambiguous") != mode.npos || mode == "address-incompatible" ? 1 : 2;
+                std::vector<const td::Keys*> signers{&keys, &other};
+                std::vector<td::Path> paths{fixture::Path(kind), fixture::Path(kind, 7)};
+                if (mode == "address-progress") {
+                    signers.assign(20, &keys); paths.clear();
+                    for (unsigned i = 0; i < 20; ++i) paths.push_back(fixture::Path(kind, i));
+                }
+                auto multi = td::ImportMultisig(fixture::Setup(kind, 2, signers, paths));
+                if (mode != "address-ambiguous-single" && mode != "address-incompatible") policy = multi;
+                if (mode != "address-unloaded") loaded.emplace(td::ApprovedWallet{multi,
+                    mode == "address-unapproved" ? td::Digest{} : keys.RegistrationTag(multi.ID())});
+            }
+            const unsigned branch = mode.find("change") != mode.npos ? 1 : 0;
+            const uint32_t index = mode == "address-late" ? 1007 : mode == "address-high" ? 0x7fffffff
+                : mode == "address-progress" ? 1000000000 : 7;
+            CTxDestination destination;
+            td::Require(ExtractDestination(policy.Script(branch, index), destination), "No fixture address");
+            const auto address = EncodeDestination(destination);
+            std::printf("EXPECTED %s\n", address.c_str());
+            const auto before = loaded ? std::optional{loaded->policy.ID()} : std::nullopt;
+            td::CheckAddress(terminal, keys, loaded ? &*loaded : nullptr, fixture::Bytes("bitcoin:" + address + "?amount=0.1&label=Public%20test"));
+            td::Require(!before || (loaded->policy.ID() == *before && keys.VerifyTag(*before, loaded->proof)), "Address check changed the loaded wallet");
+            std::puts("CHECK FINISHED");
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]).starts_with("workflow-")) {
             const std::string mode = argv[1];
             ECC_Context context;
@@ -49,7 +167,12 @@ int main(int argc, char** argv)
             auto multisig = td::ImportMultisig(setup);
             auto psbt = mode.starts_with("workflow-inline") || mode.starts_with("workflow-preload") || mode == "workflow-inferred"
                 ? fixture::Spend({&multisig}, true)
-                : fixture::Spend({&first, mode == "workflow-many" ? &second : &first}, mode == "workflow-fee");
+                : fixture::Spend({&first, mode == "workflow-many" ? &second : &first}, mode == "workflow-fee" || mode == "workflow-change-fee");
+            if (mode.starts_with("workflow-change")) {
+                psbt.tx->vout[0].scriptPubKey = first.Script(1, 1000000000);
+                psbt.outputs[0] = PSBTOutput{};
+                UpdatePSBTOutput(first.PublicProvider({1, 1000000000}), psbt, 0);
+            }
             if (mode == "workflow-inferred") fixture::AccountKeys(psbt, {&multisig});
             auto foreign = td::DefaultPolicy(bob, 84, 0);
             if (mode == "workflow-unmatched") psbt = fixture::Spend({&foreign});
@@ -57,8 +180,21 @@ int main(int argc, char** argv)
             const td::QRMessage request{"crypto-psbt", td::CborBytes({reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()})};
             std::optional<td::ReviewScreen> completed;
             unsigned scans = 0;
-            auto response = td::SignRequest(terminal, alice, loaded, request, [&] { ++scans; return setup; },
-                [&](const auto& review) { return td::ApproveTransaction(terminal, review, completed); });
+            std::optional<td::QRMessage> response;
+            try {
+                response = td::SignRequest(terminal, alice, loaded, request, [&] { ++scans; return setup; },
+                    [&](const auto& review) {
+                        if (mode.ends_with("-fee")) throw std::runtime_error("Unverified fee reached interactive approval");
+                        if (mode.starts_with("workflow-change")) std::printf("CHANGE %s\n", review.outputs[0].address.c_str());
+                        return td::ApproveTransaction(terminal, review, completed);
+                    });
+            } catch (const std::invalid_argument& error) {
+                td::Require(mode.ends_with("-fee") && !completed && !response, "Unexpected workflow failure");
+                // Match the main loop's error display; dismissal cannot retry signing.
+                terminal.Notice("Could not complete this step", {"Check the details below before trying again.", "", error.what()});
+                std::puts("BLOCKED");
+                return 0;
+            }
             td::Require(scans <= 1, "Setup caused an unnecessary transaction rescan");
             if (mode == "workflow-inferred" || mode == "workflow-unmatched" || mode.starts_with("workflow-preload"))
                 td::Require(scans == 0, "Request made an unnecessary setup scan");

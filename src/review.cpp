@@ -27,8 +27,8 @@ std::string NetworkName(ChainType network)
 ReviewLines PublicKeyReview(const Keys& keys, const Path& path)
 {
     return {
-        "This public key lets your wallet app find addresses and follow this account's activity.",
-        "", "It contains no private keys. Anyone who has it may be able to follow this account's activity.",
+        "This public key lets your wallet app find addresses and follow this account's activity. "
+        "It contains no private keys, but anyone who has it may also be able to follow that activity.",
         "", "Network: " + NetworkName(Params().GetChainType()),
         "Master fingerprint: " + HexStr(keys.RootFingerprint()), "Path: " + PathText(path),
     };
@@ -81,7 +81,7 @@ ReviewLines PolicyReview(const Policy& policy, const Keys& keys)
 {
     const bool standard = policy.IsDefault(keys);
     ReviewLines lines{
-        "Check the spending rules and public keys for this wallet. They must match the wallet you intended to set up.", "",
+        "Check who can spend from this wallet and under what conditions.", "",
         "Network: " + NetworkName(Params().GetChainType()),
         standard ? "Account: " + std::to_string(policy.KeyInformation()[0].origin[2] & 0x7fffffff) : "Wallet: " + policy.Name(),
         standard ? "Address type: " + AccountType(policy.KeyInformation()[0].origin[0] & 0x7fffffff) : "",
@@ -90,6 +90,23 @@ ReviewLines PolicyReview(const Policy& policy, const Keys& keys)
     const auto rules = PolicyRules(policy, keys);
     lines.insert(lines.end(), rules.begin(), rules.end());
     return lines;
+}
+
+ReviewLines AddressReview(const Policy& policy, const Keys& keys, Position position, const std::string& address)
+{
+    const bool standard = policy.IsDefault(keys);
+    ReviewLines lines{address, "", "Network: " + NetworkName(Params().GetChainType()),
+        standard ? "Account: " + std::to_string(policy.KeyInformation()[0].origin[2] & 0x7fffffff) : "Wallet: " + policy.Name()};
+    if (standard) lines.push_back("Address type: " + AccountType(policy.KeyInformation()[0].origin[0] & 0x7fffffff));
+    lines.push_back(std::string(position.branch ? "Change" : "Receiving") + " address number: " + std::to_string(position.index));
+    return lines;
+}
+
+bool HasHighChangeIndex(const TransactionReview& review)
+{
+    return std::any_of(review.outputs.begin(), review.outputs.end(), [](const auto& output) {
+        return output.position && output.position->branch == 1 && output.position->index > CHANGE_INDEX_WARNING_THRESHOLD;
+    });
 }
 
 ReviewLines TransactionLines(const TransactionReview& review)
@@ -108,6 +125,14 @@ ReviewLines TransactionLines(const TransactionReview& review)
         if (output.position && output.position->branch == 1) {
             change += output.amount;
             ++change_count;
+            lines.insert(lines.end(), {"", "Change output " + std::to_string(change_count), "Amount: " + Amount(output.amount),
+                "Change address index: " + std::to_string(output.position->index)});
+            if (output.position->index > CHANGE_INDEX_WARNING_THRESHOLD) {
+                lines.insert(lines.end(), {"WARNING: Unusually high change index.",
+                    "Wallet recovery may not find this change automatically.",
+                    output.address.empty() ? "Change script (hex):" : "Change address:",
+                    output.address.empty() ? HexStr(output.script) : output.address});
+            }
             continue;
         }
         lines.push_back("");
@@ -139,9 +164,7 @@ ReviewLines TransactionLines(const TransactionReview& review)
     }
     if (change_count) lines.push_back("Verified change: " + Amount(change) + " (" + std::to_string(change_count)
         + (change_count == 1 ? " output)" : " outputs)"));
-    if (review.fee_unverified) lines.push_back("The actual fee may be higher than shown. Continuing does not verify these amounts.");
-    else if (std::any_of(review.inputs.begin(), review.inputs.end(), [](const auto& input) { return !input.full_previous; }))
-        lines.push_back("Compact input data: incorrect amounts would make the signatures added here invalid.");
+    if (review.fee_unverified) lines.push_back("The actual fee may be higher than shown. Signing is blocked until the fee can be verified.");
     const bool all_final = std::all_of(review.inputs.begin(), review.inputs.end(), [](const auto& input) { return input.sequence == 0xffffffff; });
     bool timed = review.locktime && !all_final;
     if (timed) lines.push_back("Transaction locktime: " + (review.locktime < 500000000
@@ -204,14 +227,4 @@ ReviewLines TransactionDetails(const TransactionReview& review)
     return lines;
 }
 
-ReviewLines FeeWarning()
-{
-    return {
-        "Wallet apps such as Sparrow may omit previous transactions to keep QR codes small.", "",
-        "This means ThunderDen cannot fully verify the fee.", "",
-        "This is usually fine, but repeated signing requests can be abused to hide a higher fee.", "",
-        "If your wallet unexpectedly asks you to sign again, stop and check why. Otherwise, this warning is expected and you can continue.", "",
-        "Learn more: github.com/bitcoinerlab/thunderden/blob/master/docs/FEES.md",
-    };
-}
 }

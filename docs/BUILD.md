@@ -2,10 +2,15 @@
 
 ## Download a preview
 
-Download [thunderden.img](https://github.com/bitcoinerlab/thunderden/releases/download/v0.0.1-preview.6/thunderden.img)
-and [thunderden.img.sha256](https://github.com/bitcoinerlab/thunderden/releases/download/v0.0.1-preview.6/thunderden.img.sha256)
-from [v0.0.1-preview.6](https://github.com/bitcoinerlab/thunderden/releases/tag/v0.0.1-preview.6).
+Download [thunderden.img](https://github.com/bitcoinerlab/thunderden/releases/download/v0.0.1-preview.12/thunderden.img)
+and [thunderden.img.sha256](https://github.com/bitcoinerlab/thunderden/releases/download/v0.0.1-preview.12/thunderden.img.sha256)
+from [v0.0.1-preview.12](https://github.com/bitcoinerlab/thunderden/releases/tag/v0.0.1-preview.12).
 The release also includes `installed-files.json` for reviewing the built system.
+
+For optional Secure Boot, choose `thunderden-signed.img` and its matching checksum
+from the same release. Read the [enrollment and verification guide](SECURE_BOOT.md)
+before enabling Secure Boot; the signed image needs its public certificate trusted
+by your firmware. The unsigned and signed images contain the same runtime.
 
 The same 64 MiB image can be written from macOS, Linux or Windows. It boots
 x86-64 laptops with BIOS or UEFI, not Apple Silicon Macs. After downloading,
@@ -27,19 +32,23 @@ docker compose run --build --name thunderden-image-build image
 This builds the signer and its bootable Linux system. The first build also compiles
 the toolchain and dependencies, so allow plenty of time. Later builds reuse caches.
 
-Once it finishes successfully, copy the image and its checksum to your current
-folder, then remove the finished container:
+Once it finishes successfully, copy the image, checksum and file inventory to
+`out/latest/`:
 
 ```sh
-docker cp thunderden-image-build:/cache/out/images/thunderden.img .
-docker cp thunderden-image-build:/cache/out/images/thunderden.img.sha256 .
-docker rm thunderden-image-build
+mkdir -p out/latest
+docker cp thunderden-image-build:/cache/out/images/thunderden.img out/latest/
+docker cp thunderden-image-build:/cache/out/images/thunderden.img.sha256 out/latest/
+docker cp thunderden-image-build:/cache/out/images/installed-files.json out/latest/
 ```
+
+`out/latest/thunderden.img` is your last copied local build. Repeat these copy
+commands after each successful build to update it.
 
 #### Verify the image
 
 Put `thunderden.img` and `thunderden.img.sha256` in the same folder, then open a
-terminal in that folder:
+terminal in that folder (`out/latest/` for a local build):
 
 - **Linux:** `sha256sum -c thunderden.img.sha256`
 - **macOS:** `shasum -a 256 -c thunderden.img.sha256`
@@ -47,7 +56,13 @@ terminal in that folder:
   compare the `Hash` value with the hash in `thunderden.img.sha256`.
 
 Linux and macOS should report `thunderden.img: OK`. If the hash does not match,
-download the image again before writing it to USB.
+copy or download the image again before writing it to USB.
+
+After verifying a local build, remove the finished container:
+
+```sh
+docker rm thunderden-image-build
+```
 
 ### 2. Write it to a USB drive
 
@@ -69,6 +84,14 @@ while the project is under development.
 The menu order is Bitcoin mainnet, Signet, Testnet4, Regtest and legacy testnet3.
 Mainnet is initially highlighted, so choose the test network explicitly.
 
+Thunder Den offers **Scan a seed QR**, **Enter recovery words**, or
+**Create a new wallet** before showing wallet actions. The active menu identifies
+the loaded seed by its fingerprint and shows any loaded multisig setup. See
+[seed QR backups](SEED_QR.md) for the new backup display and format controls.
+These screens are included from preview 10.
+Preview 11 also offers **Change network** before a wallet is loaded. Once keys
+are loaded, end the session first to choose another network.
+
 Use the arrow keys and Enter to choose an option, or press its number. Text size
 is selected automatically. The console uses a dark background and built-in
 bitmap fonts; the available screen resolution depends on the laptop's firmware.
@@ -83,8 +106,14 @@ through review pages; Esc cancels an operation before approval.
 Address checks, registration and signing show the wallet ID and full public
 descriptor in Details. Registration requires reviewing the spending rules and
 cosigner keys before typing `REGISTER`; signing requires typing `SIGN` after review.
+From preview 12, capitalization and surrounding spaces are ignored for these approval
+words. A typo stays at the confirmation prompt with feedback, rather than cancelling
+the request. Recovery words, passphrases, addresses and public keys are not changed
+by this rule. Command-request failures are explained locally before their error QR.
 The signing review shows every non-change destination and amount, the fee, and
-verified change totals. Individual change addresses and input records are in Details.
+each verified change output's amount and index. Unusually high change indices also
+show the full address and a recovery warning. All change addresses and input
+records are available in Details.
 On a result QR, `b` or Left returns to its text review without rescanning or
 repeating approval. The final review action shows the same QR again. Esc finishes
 viewing the result and returns to the menu; it cannot undo an exported signature.
@@ -94,7 +123,7 @@ stays open until Enter starts a fresh session. Turn the laptop off completely wh
 finished rather than leaving it asleep.
 
 Ending the session also clears the loaded multisig setup. See the
-[Sparrow guide](SPARROW.md) for SeedSigner keystore setup and automatic signing,
+[Sparrow guide](SPARROW.md) for Krux keystore setup and automatic signing,
 or the [Keeper guide](KEEPER.md) for Jade QR signing and wallet registration.
 
 ## Build or test: which command do I need?
@@ -114,12 +143,19 @@ Source versions and checksums are pinned in `.env`.
 
 The image build checks source integrity, kernel settings, installed files and
 repeatable disk-image assembly. It also creates `installed-files.json`, a list of
-the files and hashes inside the boot system. To save it, run this before removing
-the build container:
+the files and hashes inside the boot system, copied alongside the image above.
 
-```sh
-docker cp thunderden-image-build:/cache/out/images/installed-files.json .
-```
+Current source builds an unsigned image with a self-contained EFI kernel and a
+legacy BIOS GRUB path that loads the same file at `/EFI/BOOT/BOOTX64.EFI`.
+The single-payload layout is image format 2 (included from preview 11),
+not the duplicated layout in preview 10. The disk remains 64 MiB; its used payload
+is approximately halved. Current packaging tools accept only format 2. Use the
+matching tagged tools to reconstruct older releases.
+
+Optional signing happens **after the build**, without
+giving the build a private key. See [signed images and Secure Boot](SECURE_BOOT.md)
+for manual developer/user signing, paired release assets and exact reconstruction
+of the signed image from the unsigned one and public signature material.
 
 ## Write the USB from Linux
 
@@ -133,6 +169,9 @@ In the commands below, replace `/dev/sdX` with the **whole USB device**, such as
 `/dev/sdb`, not a partition such as `/dev/sdb1`. Unmount any mounted partitions
 listed for that USB first, for example with `sudo umount /dev/sdb1`.
 **The write command overwrites the selected drive.**
+
+Run these commands from the folder containing the verified image (`out/latest/`
+for a local build):
 
 ```sh
 sudo dd if=thunderden.img of=/dev/sdX bs=4M conv=fsync status=progress
@@ -158,6 +197,36 @@ Downloads and build outputs stay in Docker volumes when you remove a container.
 `--build` does not clear those volumes. AMD64 and ARM64 builders need separate
 output caches.
 
+### Fast local image builds
+
+Compatible build caches make application rebuilds much faster than rebuilding
+the toolchain and dependencies. Previously verified images can also be reused
+when their runtime/build inputs have not changed.
+
+1. Record the requested source revision. If `.env`, `CMakeLists.txt`, `src/`,
+   `build/`, `platform/` and the relevant Compose/builder inputs are unchanged
+   from an archived build, reuse its image. Documentation changes alone do not
+   change the runtime; a byte-identical EFI payload can reuse its public signature.
+2. Otherwise reuse the existing pinned builder and a compatible **development**
+   output volume. `build/image.sh` already refreshes the application directory and
+   regenerates the embedded runtime/kernel while keeping toolchain and dependency
+   outputs. Avoid `--no-cache`, fresh toolchain volumes and whole-cache copies
+   unless needed for changed pins/architecture, concurrent builds or an explicitly
+   requested clean-build comparison. Never repurpose a frozen release/reference
+   volume as a mutable development cache.
+3. Keep the script's source-integrity, image-content and repeat-assembly checks.
+   Export artifacts into a new revision-specific directory. Reuse the builder
+   without `--build` only when its pinned inputs/Dockerfile still match.
+4. [Prepare the EFI and sign manually](SECURE_BOOT.md#commands-and-technical-details).
+   Private signing keys and passwords stay outside agents and containers. Package
+   with `secure_boot.py package`, which checks the trusted public certificate,
+   verifies the detached and attached signatures, and creates the signed image.
+5. Choose validation for the change: run relevant regression tests for software
+   changes, boot/display checks for boot or rendering changes, and clean-build
+   comparisons for reproducibility work. Repackaging unchanged bytes does not
+   require repeating those tests. Record verification scope accurately and
+   investigate failures. Cached builds do not replace release verification.
+
 ## Run the software tests
 
 ```sh
@@ -169,11 +238,14 @@ derivation, wallet policies, signing, QR exchange, the terminal interface and
 scanner isolation. They use public test data and simulated devices; no USB drive
 or webcam is needed. Test programs are not installed in the boot image.
 
-The tests run in a restricted container. Some isolation checks may be skipped
-when the host kernel lacks Landlock ABI 6 support, normally available with
-Landlock enabled on Linux 6.12 or later. The USB image includes its own kernel
-with that support. See [STATUS.md](STATUS.md) for coverage and physical-hardware
-checks still to do.
+The full suite requires Landlock ABI 6 enabled and usable inside the restricted
+container, normally with Linux 6.12 or later. Only the older `isolation` suite
+reports a skip when that ABI is unavailable. `entropy-confinement`,
+`entropy-assessment` and the camera-assessment cases in `terminal` fail on an
+unsupported host; the full suite is not expected to pass there. Docker uses the
+host kernel (or Docker VM kernel), not the kernel bundled in the USB image.
+The USB image includes its own supported kernel. See [STATUS.md](STATUS.md) for
+coverage and physical-hardware checks still to do.
 
 After building the test image, rerun the same compiled tests with detailed output:
 
@@ -227,8 +299,8 @@ commands require a Linux host with QEMU, a built USB image and the Docker test
 image from the software-test command above.
 
 ```sh
-python3 tests/boot.py thunderden.img /tmp/thunderden-bios
-python3 tests/boot.py thunderden.img /tmp/thunderden-uefi --firmware /path/to/OVMF.fd
+python3 tests/boot.py out/latest/thunderden.img /tmp/thunderden-bios
+python3 tests/boot.py out/latest/thunderden.img /tmp/thunderden-uefi --firmware /path/to/OVMF.fd
 ```
 
 The first command tests BIOS boot; the second tests UEFI boot using a combined
@@ -252,5 +324,8 @@ python3 tests/boot_isolation.py /tmp/bzImage /tmp/isolation-tests
 ```
 
 The test program is loaded in a temporary overlay, separate from the USB image.
+This developer check uses QEMU's legacy `-kernel`/`-initrd` path, not authenticated
+UEFI boot; the EFI stub deliberately refuses external initramfs loading. Use the
+[Secure Boot tests](SECURE_BOOT.md#developer-checks) to check that boundary.
 
 </details>

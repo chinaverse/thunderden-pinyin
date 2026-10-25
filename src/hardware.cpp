@@ -8,10 +8,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <stdexcept>
+#include <support/allocators/zeroafterfree.h>
 
 namespace td {
 namespace {
+constexpr std::array<uint8_t, 3> BACKGROUND{25, 26, 24}, BRIGHT{255, 255, 250}, ACCENT{247, 147, 26}, MUTED{168, 171, 163};
+
 void ShowFrames(Terminal& terminal, std::string frame, URSender* sender, const ReviewScreen* review)
 {
     const bool animated = sender && sender->Parts() > 1;
@@ -49,6 +53,57 @@ void ShowQR(Terminal& terminal, const QRMessage& message, const ReviewScreen* re
 void ShowQR(Terminal& terminal, const std::string& text, const ReviewScreen* review)
 {
     ShowFrames(terminal, text, nullptr, review);
+}
+
+bool ShowSeedQR(Terminal& terminal, std::span<const unsigned char> mnemonic, bool reviewing)
+{
+    auto format = SeedQRFormat::Standard;
+    Display display(terminal);
+    while (true) {
+        const auto data = EncodeSeedQR(mnemonic, format);
+        const QRImage image(data, format == SeedQRFormat::Standard);
+        const std::string caption = std::string(format == SeedQRFormat::Standard ? "Standard SeedQR   F: Compact" : "CompactSeedQR   F: Standard")
+            + (reviewing ? "   Q: Words   Esc: Back" : "   Esc: Words");
+        display.QR(image, caption, "Private recovery backup. Keep it private like your words.");
+        terminal.Flush();
+        while (true) {
+            const int key = terminal.Key();
+            if (key == 27 || key == 3 || (reviewing && (key == '\r' || key == '\n'))) return reviewing;
+            if (key == 'q' || key == 'Q') return false;
+            if (key == 'f' || key == 'F') break;
+        }
+        format = format == SeedQRFormat::Standard ? SeedQRFormat::Compact : SeedQRFormat::Standard;
+    }
+}
+
+bool ShowRecoveryWords(Terminal& terminal, std::span<const unsigned char> mnemonic, bool reviewing)
+{
+    // Text-only development consoles retain the existing paginated word backup.
+    const int fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+    if (fd < 0) return false;
+    close(fd);
+    auto format = SeedQRFormat::Standard;
+    bool visible = true;
+    Display display(terminal);
+    while (true) {
+        const auto data = EncodeSeedQR(mnemonic, format);
+        const QRImage image(data, format == SeedQRFormat::Standard);
+        if (!display.RecoveryWords(mnemonic, visible ? &image : nullptr, format, reviewing)) return false;
+        terminal.Flush();
+        while (true) {
+            const int key = terminal.Key();
+            if (key == 27 || key == 3) {
+                if (reviewing) return true;
+                throw Cancelled{};
+            }
+            if (key == '\r' || key == '\n') return true;
+            if (key == 'q' || key == 'Q') { visible = !visible; break; }
+            if (visible && (key == 'f' || key == 'F')) {
+                format = format == SeedQRFormat::Standard ? SeedQRFormat::Compact : SeedQRFormat::Standard;
+                break;
+            }
+        }
+    }
 }
 
 void ConfigureConsole(int tty)
@@ -89,7 +144,7 @@ void ConfigureConsole(int tty)
     (void)resized; // An unsupported font size leaves the already-selected font.
 }
 
-Display::Display(Terminal& tty) : tty_(tty.FD())
+Display::Display(Terminal& tty) : tty_(tty.FD()), network_(tty.Network())
 {
     fd_ = open("/dev/fb0", O_RDWR | O_CLOEXEC);
     if (fd_ < 0) throw std::runtime_error("A framebuffer display is required");
@@ -133,26 +188,24 @@ Display::Display(Terminal& tty) : tty_(tty.FD())
 
 void Display::Close()
 {
+    // Camera previews and recovery QR/word pixels are secrets too. Do not leave
+    // them in the framebuffer when returning to text mode, including on cancel.
+    if (graphics_ && memory_) Clear();
     if (graphics_) ioctl(tty_, KDSETMODE, KD_TEXT);
     if (memory_) munmap(memory_, fixed_.smem_len);
     if (fd_ >= 0) close(fd_);
 }
 
-Display::~Display()
-{
-    // Leave no recovery-word candidates or QR payloads in framebuffer memory.
-    if (memory_) Clear();
-    Close();
-}
+Display::~Display() { Close(); }
 
 void Display::ClearRow(unsigned row)
 {
     if (row >= Rows()) return;
     for (unsigned y = row * font_height_; y < (row + 1) * font_height_; ++y)
-        for (unsigned x = 0; x < variable_.xres; ++x) Pixel(x, y, 25);
+        for (unsigned x = 0; x < variable_.xres; ++x) Pixel(x, y, BACKGROUND);
 }
 
-unsigned Display::Text(unsigned column, unsigned row, std::string_view text, uint8_t gray)
+unsigned Display::CellText(unsigned column, unsigned row, std::string_view text, uint8_t gray)
 {
     const unsigned stride = (font_width_ + 7) / 8;
     for (const char c : text) {
@@ -160,8 +213,9 @@ unsigned Display::Text(unsigned column, unsigned row, std::string_view text, uin
         const unsigned ch = static_cast<unsigned char>(c);
         const auto* glyph = font_.data() + (ch < 128 ? ch : '?') * 64 * stride;
         for (unsigned y = 0; y < font_height_; ++y) for (unsigned x = 0; x < font_width_; ++x) {
-            Pixel(column * font_width_ + x, row * font_height_ + y,
-                (glyph[y * stride + x / 8] & (0x80 >> (x % 8))) ? gray : 25);
+            const unsigned px = column * font_width_ + x, py = row * font_height_ + y;
+            if (glyph[y * stride + x / 8] & (0x80 >> (x % 8))) Pixel(px, py, gray);
+            else Pixel(px, py, BACKGROUND);
         }
         ++column;
     }
@@ -176,7 +230,7 @@ unsigned Display::Hanzi(unsigned column, unsigned row, std::span<const uint8_t, 
     const unsigned left = column * font_width_ + (2 * font_width_ - size) / 2;
     const unsigned top = row * font_height_ + (font_height_ - size) / 2;
     for (unsigned y = row * font_height_; y < (row + 1) * font_height_; ++y)
-        for (unsigned x = column * font_width_; x < (column + 2) * font_width_; ++x) Pixel(x, y, 25);
+        for (unsigned x = column * font_width_; x < (column + 2) * font_width_; ++x) Pixel(x, y, BACKGROUND);
     for (unsigned y = 0; y < size; ++y) for (unsigned x = 0; x < size; ++x) {
         const unsigned gx = x / scale, gy = y / scale;
         if (glyph[gy * 2 + gx / 8] & (0x80 >> (gx % 8))) Pixel(left + x, top + y, gray);
@@ -186,9 +240,15 @@ unsigned Display::Hanzi(unsigned column, unsigned row, std::span<const uint8_t, 
 
 void Display::Pixel(unsigned x, unsigned y, uint8_t gray)
 {
+    Pixel(x, y, {gray, gray, gray});
+}
+
+void Display::Pixel(unsigned x, unsigned y, std::array<uint8_t, 3> color)
+{
     uint32_t value = 0;
+    size_t i = 0;
     for (const auto channel : {variable_.red, variable_.green, variable_.blue}) {
-        value |= (uint32_t(gray) >> (8 - channel.length)) << channel.offset;
+        value |= (uint32_t(color[i++]) >> (8 - channel.length)) << channel.offset;
     }
     if (variable_.transp.length) value |= ((1U << variable_.transp.length) - 1) << variable_.transp.offset;
     auto* pixel = memory_ + (y + variable_.yoffset) * size_t(fixed_.line_length)
@@ -199,7 +259,8 @@ void Display::Pixel(unsigned x, unsigned y, uint8_t gray)
 void Display::Clear()
 {
     preview_progress_ = -1;
-    for (unsigned y = 0; y < variable_.yres; ++y) for (unsigned x = 0; x < variable_.xres; ++x) Pixel(x, y, 25);
+    qr_width_ = 0;
+    for (unsigned y = 0; y < variable_.yres; ++y) for (unsigned x = 0; x < variable_.xres; ++x) Pixel(x, y, BACKGROUND);
 }
 
 unsigned Display::Caption(const ReviewLines& lines)
@@ -207,30 +268,37 @@ unsigned Display::Caption(const ReviewLines& lines)
     const auto wrapped = Wrap(lines, (variable_.xres - 32) / font_width_);
     const unsigned height = wrapped.size() * (font_height_ + 4) + 16;
     Require(height < variable_.yres / 2, "Not enough room for the camera or QR code.");
-    const unsigned stride = (font_width_ + 7) / 8;
     for (unsigned y = variable_.yres - height; y < variable_.yres; ++y) {
-        for (unsigned x = 0; x < variable_.xres; ++x) Pixel(x, y, 25);
+        for (unsigned x = 0; x < variable_.xres; ++x) Pixel(x, y, BACKGROUND);
     }
     for (size_t row = 0; row < wrapped.size(); ++row) {
-        for (size_t i = 0; i < wrapped[row].size(); ++i) {
-            const unsigned ch = static_cast<unsigned char>(wrapped[row][i]);
-            const auto* glyph = font_.data() + ch * 64 * stride;
-            for (unsigned y = 0; y < font_height_; ++y) for (unsigned x = 0; x < font_width_; ++x) {
-                Pixel(16 + i * font_width_ + x, variable_.yres - height + 8 + row * (font_height_ + 4) + y,
-                    (glyph[y * stride + x / 8] & (0x80 >> (x % 8))) ? 239 : 25);
-            }
-        }
+        Text(16, variable_.yres - height + 8 + row * (font_height_ + 4), wrapped[row]);
     }
     return height;
 }
 
-void Display::Preview(std::span<const uint8_t> gray, unsigned width, unsigned height, double progress)
+void Display::Text(unsigned xoff, unsigned yoff, std::string_view text, std::array<uint8_t, 3> color)
 {
+    Require(xoff + text.size() * font_width_ <= variable_.xres && yoff + font_height_ <= variable_.yres, "Display text does not fit");
+    const unsigned stride = (font_width_ + 7) / 8;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const unsigned ch = static_cast<unsigned char>(text[i]);
+        Require(ch >= 32 && ch <= 126, "Invalid display text");
+        const auto* glyph = font_.data() + ch * 64 * stride;
+        for (unsigned y = 0; y < font_height_; ++y) for (unsigned x = 0; x < font_width_; ++x)
+            Pixel(xoff + i * font_width_ + x, yoff + y, (glyph[y * stride + x / 8] & (0x80 >> (x % 8))) ? color : BACKGROUND);
+    }
+}
+
+void Display::Preview(std::span<const uint8_t> gray, unsigned width, unsigned height, double progress, bool seed)
+{
+    qr_width_ = 0;
     Require(width > 0 && width <= 1920 && height > 0 && height <= 1080
         && gray.size() == size_t(width) * height, "Invalid preview image");
     const int percent = int(progress * 100);
     if (percent != preview_progress_) {
-        caption_height_ = Caption({"Point this device's camera at the code in your wallet app.",
+        caption_height_ = Caption({seed ? "Point this device's camera at your seed QR backup."
+                : "Point this device's camera at the code in your wallet app.",
             std::to_string(percent) + "% scanned   Esc: Cancel"});
         preview_progress_ = percent;
     }
@@ -243,20 +311,105 @@ void Display::Preview(std::span<const uint8_t> gray, unsigned width, unsigned he
     }
 }
 
-void Display::QR(const QRImage& image, std::string_view caption)
+void Display::QR(const QRImage& image, std::string_view caption, std::string_view instruction)
 {
     const unsigned modules = image.width + 8;
-    Clear();
-    const auto height = Caption({"Use your wallet app to scan this QR code.", std::string(caption)});
-    const unsigned scale = std::min(variable_.xres, variable_.yres - height) / modules;
-    Require(scale >= 2, "This QR code is too large for the screen.");
-    const unsigned xoff = (variable_.xres - modules * scale) / 2 + 4 * scale;
-    const unsigned yoff = (variable_.yres - height - modules * scale) / 2 + 4 * scale;
-    for (unsigned y = yoff - 4 * scale; y < yoff + (image.width + 4) * scale; ++y)
-        for (unsigned x = xoff - 4 * scale; x < xoff + (image.width + 4) * scale; ++x) Pixel(x, y, 255);
-    for (int y = 0; y < image.width; ++y) for (int x = 0; x < image.width; ++x) {
-        if (!image.modules[y * image.width + x]) continue;
-        for (unsigned dy = 0; dy < scale; ++dy) for (unsigned dx = 0; dx < scale; ++dx) Pixel(xoff + x * scale + dx, yoff + y * scale + dy, 0);
+    const ReviewLines lines{std::string(instruction), std::string(caption)};
+    if (image.width != qr_width_ || lines != qr_caption_) {
+        Clear();
+        caption_height_ = Caption(lines);
+        qr_width_ = image.width;
+        qr_caption_ = lines;
     }
+    const unsigned scale = std::min(variable_.xres, variable_.yres - caption_height_) / modules;
+    Require(scale >= 2, "This QR code is too large for the screen.");
+    Code(image, (variable_.xres - modules * scale) / 2, (variable_.yres - caption_height_ - modules * scale) / 2, scale);
+}
+
+void Display::Code(const QRImage& image, unsigned x, unsigned y, unsigned scale)
+{
+    Require(scale > 0 && x + (image.width + 8) * scale <= variable_.xres
+        && y + (image.width + 8) * scale <= variable_.yres, "QR code does not fit");
+    const unsigned modules = image.width + 8, side = modules * scale, bytes = variable_.bits_per_pixel / 8;
+    const size_t stride = size_t(side) * bytes;
+    uint32_t black = variable_.transp.length ? ((1U << variable_.transp.length) - 1) << variable_.transp.offset : 0;
+    uint32_t white = black;
+    for (const auto channel : {variable_.red, variable_.green, variable_.blue})
+        white |= ((1U << channel.length) - 1) << channel.offset;
+    // Recovery QRs share this path. Wipe even on exceptions, without the locked
+    // allocator's small-allocation limit: scaled QR pixels can occupy megabytes.
+    std::vector<uint8_t, zero_after_free_allocator<uint8_t>> pixels(stride * side);
+    for (unsigned row = 0; row < modules; ++row) {
+        auto* line = pixels.data() + row * scale * stride;
+        auto* out = line;
+        for (unsigned column = 0; column < modules; ++column) {
+            const bool dark = row >= 4 && row < modules - 4 && column >= 4 && column < modules - 4
+                && image.modules[(row - 4) * image.width + column - 4];
+            const uint32_t value = dark ? black : white;
+            for (unsigned dx = 0; dx < scale; ++dx) for (unsigned byte = 0; byte < bytes; ++byte)
+                *out++ = (value >> (8 * byte)) & 0xff;
+        }
+        for (unsigned dy = 1; dy < scale; ++dy) std::memcpy(line + dy * stride, line, stride);
+    }
+    // Keep the old QR visible throughout preparation. This short row copy is
+    // not a vblank-synchronized swap, but never exposes a white-fill stage.
+    for (unsigned row = 0; row < side; ++row)
+        std::memcpy(memory_ + (y + row + variable_.yoffset) * size_t(fixed_.line_length)
+            + (x + variable_.xoffset) * bytes, pixels.data() + row * stride, stride);
+}
+
+bool Display::RecoveryWords(std::span<const unsigned char> mnemonic, const QRImage* qr, SeedQRFormat format, bool reviewing)
+{
+    const std::string_view words(reinterpret_cast<const char*>(mnemonic.data()), mnemonic.size());
+    const size_t count = 1 + std::count(words.begin(), words.end(), ' ');
+    // Match Terminal::View/Draw's centered console grid, including its blank
+    // title/body row and two bottom rows. Only the private body uses pixel layout.
+    const unsigned screen_columns = variable_.xres / font_width_, screen_rows = variable_.yres / font_height_;
+    if (screen_columns < 40 || screen_rows < 12) return false;
+    const unsigned width = std::min(80U, screen_columns - 2), left = (screen_columns - width) / 2 * font_width_;
+    const unsigned body = screen_rows >= 20 ? 6 : 5, top = (body - 1) * font_height_;
+    const unsigned divider = (screen_rows - 3) * font_height_, bottom = divider - (reviewing ? 1 : 2) * font_height_;
+    const unsigned row = font_height_ + std::max(4U, font_height_ / 8), gap = font_height_ / 2;
+    const unsigned columns = count == 24 ? 2 : 1, per_column = (count + columns - 1) / columns;
+    const unsigned words_width = columns * 15 * font_width_, qr_x = left + words_width + 3 * font_width_;
+    const unsigned right = left + width * font_width_;
+    if (top >= bottom || per_column * row > bottom - top || qr_x >= right) return false;
+    const unsigned available = right - qr_x;
+    if (available < 21 * font_width_ || available < 37 * 3 || 2 * row + gap + 37 * 3 > bottom - top) return false;
+    Clear();
+    Text(left, (body - 5) * font_height_, "THUNDER DEN", BRIGHT);
+    Text(right - network_.size() * font_width_, (body - 5) * font_height_, network_, ACCENT);
+    const std::string rule(width, '-');
+    Text(left, (body - 4) * font_height_, rule, MUTED);
+    Text(left, (body - 3) * font_height_, reviewing ? "Private recovery backup" : "Write down your recovery words", BRIGHT);
+    Text(left, divider, rule, MUTED);
+    // Render secrets directly from the secure mnemonic, never through ReviewLines
+    // or a normal std::string screen cache.
+    size_t start = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const auto end = words.find(' ', start);
+        const unsigned x = left + (i / per_column) * 15 * font_width_, y = top + (i % per_column) * row;
+        Text(x, y, std::to_string(i + 1) + ".");
+        Text(x + 4 * font_width_, y, words.substr(start, end == words.npos ? end : end - start));
+        start = end + 1;
+    }
+    if (qr) {
+        const unsigned modules = qr->width + 8;
+        const unsigned scale = std::min(available, bottom - top - 2 * row - gap) / modules;
+        Require(scale >= 3, "Seed QR does not fit");
+        const unsigned x = qr_x + (available - modules * scale) / 2;
+        Code(*qr, x, top, scale);
+        const std::string_view label = format == SeedQRFormat::Standard ? "Standard SeedQR" : "CompactSeedQR";
+        const std::string_view action = format == SeedQRFormat::Standard ? "F: Switch to Compact" : "F: Switch to Standard";
+        Text(qr_x + (available - label.size() * font_width_) / 2, top + modules * scale + gap, label);
+        Text(qr_x + (available - action.size() * font_width_) / 2, top + modules * scale + gap + row, action, MUTED);
+    } else {
+        constexpr std::string_view hidden = "Seed QR hidden";
+        Text(qr_x + (available - hidden.size() * font_width_) / 2, top, hidden, MUTED);
+    }
+    if (!reviewing) Text(left, bottom, "Copy every word in order.");
+    Text(left, divider + font_height_, reviewing ? qr ? "Q: Hide QR   Enter: Back   Esc: Back" : "Q: Show QR   Enter: Back   Esc: Back"
+        : qr ? "Q: Hide QR   Enter: Check backup   Esc: Cancel" : "Q: Show QR   Enter: Check backup   Esc: Cancel", MUTED);
+    return true;
 }
 }

@@ -63,7 +63,7 @@ QRReply HandleQRRequest(const QRMessage& message, const Keys& keys, const QRAppr
             in.End();
             const auto xpub = EncodePublic(keys.PublicAt(path), chain == ChainType::MAIN);
             auto lines = PublicKeyReview(keys, path);
-            lines.insert(lines.begin(), {"Your wallet app is asking for this public key.", ""});
+            lines.insert(lines.begin(), {"Review the public key you're being asked to share.", ""});
             lines.insert(lines.end(), {"", "Extended public key:", xpub});
             if (!Approve(approve.export_key, lines)) status = 1;
             body.Array(2); body.Array(path.size());
@@ -86,11 +86,9 @@ QRReply HandleQRRequest(const QRMessage& message, const Keys& keys, const QRAppr
                     CTxDestination destination;
                     Require(ExtractDestination(policy.Script(branch, index), destination), "Invalid address");
                     const auto address = EncodeDestination(destination);
-                    if (!Approve(approve.address, {"Your wallet app is asking you to check this address. Compare the complete address with the one shown in your wallet app.", "",
-                        "Network: " + NetworkName(chain),
-                        policy.IsDefault(keys) ? "Account: " + std::to_string(policy.KeyInformation()[0].origin[2] & 0x7fffffff) : "Wallet: " + policy.Name(),
-                        AddressPosition({static_cast<unsigned>(branch), static_cast<uint32_t>(index)}), address},
-                        PolicyDetails(policy, keys))) status = 1;
+                    auto lines = AddressReview(policy, keys, {static_cast<unsigned>(branch), static_cast<uint32_t>(index)}, address);
+                    lines.insert(lines.begin(), {"Compare this full address with the one shown in your wallet app.", ""});
+                    if (!Approve(approve.address, lines, PolicyDetails(policy, keys))) status = 1;
                     body.Array(1); body.Text(address);
                 } else {
                     const auto psbt = in.Bytes(ReviewedTransaction::MAX_PSBT_BYTES);
@@ -114,5 +112,29 @@ QRReply HandleQRRequest(const QRMessage& message, const Keys& keys, const QRAppr
     if (status) out.Array(0);
     else out.data.insert(out.data.end(), body.data.begin(), body.data.end());
     return {{"bytes", CborBytes(out.data)}, status};
+}
+
+std::optional<ReviewScreen> QRFailureReview(unsigned status)
+{
+    if (status == 0 || status == 1) return {}; // Success and explicit cancellation are not errors.
+    ReviewScreen review;
+    if (status == 2) {
+        review = {"Request rejected", {
+            "The request, wallet setup, registration proof or transaction could not be validated.",
+            "Check the wallet setup and transaction data in your wallet app, including previous transactions."}, {}};
+    } else if (status == 4) {
+        review = {"Wrong Bitcoin network", {
+            "Your wallet app requested a different Bitcoin network from this session.",
+            "Choose the same network in your wallet app. To change it here, end this session first."}, {}};
+    } else {
+        Require(status == 5, "Unknown QR reply status");
+        review = {"Unsupported request", {
+            "Your wallet app requested an operation Thunder Den does not support.",
+            "Check that your wallet app supports Thunder Den's QR commands."}, {}};
+    }
+    review.summary.insert(review.summary.begin(), {"Nothing has been signed or registered.", ""});
+    review.summary.insert(review.summary.end(), {"", "Scan the error response with your wallet app to report this failed request."});
+    review.warning = true;
+    return review;
 }
 }

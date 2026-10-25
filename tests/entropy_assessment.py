@@ -1,0 +1,119 @@
+"""Actual isolated NIST entry point with public fixtures; no wallet-generation data."""
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import shlex
+import struct
+import signal
+import subprocess
+import time
+
+SEALS = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+
+
+def assess(binary, data, *, sealed=True, threads=1, official=False, truncate=False, progress=False, timeout=130):
+    source = os.memfd_create('public-entropy-fixture', os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    report = os.memfd_create('public-assessment', os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    updates = os.memfd_create('public-assessment-progress', os.MFD_CLOEXEC)
+    safe_in = safe_out = safe_updates = -1
+    pid = None
+    try:
+        assert os.write(source, data) == len(data)
+        if sealed:
+            fcntl.fcntl(source, fcntl.F_ADD_SEALS, SEALS)
+        safe_in = fcntl.fcntl(source, fcntl.F_DUPFD_CLOEXEC, 5)
+        safe_out = fcntl.fcntl(report, fcntl.F_DUPFD_CLOEXEC, 5)
+        safe_updates = fcntl.fcntl(updates, fcntl.F_DUPFD_CLOEXEC, 6)
+        actions = [(os.POSIX_SPAWN_DUP2, safe_in, 3), (os.POSIX_SPAWN_DUP2, safe_out, 4), (os.POSIX_SPAWN_DUP2, safe_updates, 5)]
+        actions += [(os.POSIX_SPAWN_OPEN, fd, '/dev/null', os.O_RDONLY if fd == 0 else os.O_WRONLY, 0) for fd in range(3)]
+        actions.append((os.POSIX_SPAWN_CLOSEFROM, 6))
+        command = [str(binary)] + (['-i', '-t' if truncate else '-a', '-q', '-o', '/proc/self/fd/4', '/proc/self/fd/3', '8'] if official else [])
+        env = {'LANG': 'C', 'LC_ALL': 'C', 'TZ': 'UTC0', 'OMP_NUM_THREADS': str(threads), 'OMP_THREAD_LIMIT': str(threads), 'OMP_DYNAMIC': 'FALSE'}
+        start = time.monotonic()
+        pid = os.posix_spawn(str(binary), command, env, file_actions=actions, setsid=True)
+        timed_out = False
+        while True:
+            found, status, usage = os.wait4(pid, os.WNOHANG)
+            if found:
+                break
+            if time.monotonic() - start > timeout:
+                os.kill(pid, signal.SIGKILL)
+                _, status, usage = os.wait4(pid, 0)
+                timed_out = True
+                break
+            time.sleep(0.02)
+        pid = None
+        elapsed = time.monotonic() - start
+        size = os.fstat(report).st_size
+        assert size <= 65536, 'Assessment output exceeded its budget'
+        result = json.loads(os.pread(report, size, 0)) if size else {}
+        score = next((case['hAssessed'] for case in result.get('testCases') or [] if case.get('testCaseDesc') == 'Overall'), None)
+        summary = {'samples': len(data), 'threads': threads, 'seconds': round(elapsed, 3), 'peak_rss_kib': usage.ru_maxrss,
+                   'cpu_seconds': round(usage.ru_utime + usage.ru_stime, 3), 'exit_code': os.waitstatus_to_exitcode(status),
+                   'timeout': timed_out, 'bits_per_sample': score}
+        if progress:
+            length = os.fstat(updates).st_size
+            assert length <= 65536 and length % 20 == 0, 'Unbounded or incomplete progress records'
+            summary['progress'] = list(struct.iter_unpack('>BBBBIId', os.pread(updates, length, 0)))
+        return summary, result
+    finally:
+        if pid is not None:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        for fd in (source, report, updates, safe_in, safe_out, safe_updates):
+            if fd >= 0:
+                os.close(fd)
+
+
+def tests(binary, parser_binary=None):
+    for count, sealed in ((1048575, True), (2097153, True), (1048576, False)):
+        summary, report = assess(binary, bytes(count), sealed=sealed)
+        assert summary['exit_code'] != 0 and not report, 'Invalid sample descriptor accepted'
+    summary, report = assess(binary, bytes(1048576))
+    assert summary['exit_code'] == 255 and report['errorLevel'] == -1
+    assert report['errorMessage'] == 'Symbol alphabet consists of 1 symbol. No entropy awarded...'
+    assert summary['bits_per_sample'] is None, 'Constant block pretended to complete the battery'
+    data = hashlib.shake_256(b'PUBLIC reproducible fixture, NOT secret entropy').digest(1048576)
+    summary, report = assess(binary, data, progress=True)
+    assert summary['exit_code'] == 0 and not summary['timeout'], summary
+    assert len(report['testCases']) == 11 and report['IID'] is False and report['errorLevel'] == 0
+    assert report['sha256'] == hashlib.sha256(data).hexdigest(), 'NIST did not receive the immutable sample bytes'
+    assert 0 <= summary['bits_per_sample'] <= 8
+    command = shlex.split(report['commandline'])
+    assert '-t' in command and '-a' not in command, 'Production assessment did not use the truncated bitstring mode'
+    reference, expected = assess(binary.with_name('ea_non_iid'), data, official=True, truncate=True)
+    assert reference['exit_code'] == 0 and not reference['timeout'], reference
+    assert report['testCases'] == expected['testCases'], 'Isolated assessment differs from official -i -t results'
+    updates = summary.pop('progress')
+    assert updates[0] == (0, 0, 3, 0, len(data), 1000000, -1)
+    completed = {(test, branch): estimate for kind, test, branch, reserved, done, total, estimate in updates if kind == 3}
+    assert len(completed) == 17, 'Missing individual completed estimates'
+    for test, case in enumerate(report['testCases'][:-1], 1):
+        for branch, key in ((1, 'hOriginal'), (2, 'hBitstring')):
+            if test in (5, 6):
+                key = ('bin' if branch == 2 else '') + ('TTupleRes' if test == 5 else 'LrsRes')
+                if branch == 1:
+                    key = key[0].lower() + key[1:]
+            if key in case:
+                assert completed[test, branch] == case[key], 'Preliminary result differs from final estimator output'
+    if parser_binary:
+        for samples in (data, bytes(value & 1 for value in data)):
+            if samples != data:
+                summary, report = assess(binary, samples)
+                assert summary['exit_code'] == 0 and not summary['timeout'], summary
+            parsed = subprocess.run([parser_binary, '--assessment-report'], input=json.dumps(report),
+                                    text=True, capture_output=True, check=True)
+            assert float(parsed.stdout) == summary['bits_per_sample'], 'Signer changed the official score'
+    print('PASS: sealed RAM-only input, invalid descriptors, constant-data status, official -i -t results and exact sample bytes')
+    print(json.dumps(summary, sort_keys=True))
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('binary', type=Path)
+    parser.add_argument('parser_binary', type=Path, nargs='?')
+    args = parser.parse_args()
+    tests(args.binary, args.parser_binary)

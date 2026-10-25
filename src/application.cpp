@@ -1,6 +1,7 @@
 #include "application.h"
 #include "terminal.h"
 #include "wallet_qr.h"
+#include "seed_qr.h"
 #include <util/strencodings.h>
 
 namespace td {
@@ -15,18 +16,22 @@ std::optional<Digest> ApproveWallet(const Policy& policy, const Keys& keys, cons
 
 bool LoadWallet(Terminal& terminal, const Keys& keys, std::optional<ApprovedWallet>& loaded, const QRMessage& message)
 {
+    Require(!IsSeedQR(message), "You scanned recovery words. Scan the multisig wallet setup instead.");
     return LoadWallet(terminal, keys, loaded, ImportMultisig(message), false);
 }
 
 bool LoadWallet(Terminal& terminal, const Keys& keys, std::optional<ApprovedWallet>& loaded, Policy policy, bool from_psbt)
 {
     const auto proof = ApproveWallet(policy, keys, [&](auto lines, const auto& details) {
-        lines.insert(lines.begin(), {loaded ? "This will replace the loaded multisig wallet." : "Load this wallet for the current session.",
-            from_psbt ? "Its setup was included in the transaction request." : "Its setup was read from your wallet setup QR.",
-            "Compare the cosigner keys with their devices or your trusted wallet backup.",
-            "Receiving addresses use /0/*; change uses /1/*.", ""});
-        return terminal.Approve("Check this multisig wallet", lines, "REGISTER", details, false,
-            "Type REGISTER to approve this wallet (this won't sign the transaction yet).");
+        lines.front() = "Check the spending rules and compare the cosigner keys with their devices or your trusted wallet backup.";
+        lines.insert(lines.begin(), {from_psbt ? "The scanned transaction includes a multisig wallet setup. Review the setup first."
+            : "You scanned a multisig wallet setup.", "",
+            "Review and approve it so you can verify this wallet's addresses and sign transactions.",
+            "You'll still review and approve each transaction before signing.", ""});
+        auto setup_details = details;
+        setup_details.insert(setup_details.begin(), {"Receiving addresses use /0/*; change uses /1/*.", ""});
+        return terminal.Approve(loaded && loaded->policy.ID() != policy.ID() ? "Switch wallet setup" : "Review wallet setup",
+            lines, "REGISTER", setup_details, false, "Approve only if this is the wallet you intended to use.");
     });
     if (!proof) return false;
     loaded.emplace(ApprovedWallet{std::move(policy), *proof});
@@ -35,11 +40,14 @@ bool LoadWallet(Terminal& terminal, const Keys& keys, std::optional<ApprovedWall
 
 bool ApproveTransaction(Terminal& terminal, const TransactionReview& review, std::optional<ReviewScreen>& completed)
 {
-    if (review.fee_unverified && !terminal.Confirm("Fee not fully verified", FeeWarning(), "continue to review", {}, true)) return false;
-    completed = ReviewScreen{review.fee_unverified ? "Signed - fee not fully verified" : "Signed transaction - review",
-        TransactionLines(review), TransactionDetails(review), review.fee_unverified};
-    return terminal.Approve(review.fee_unverified ? "Review - fee not fully verified" : "Review transaction",
-        completed->summary, "SIGN", completed->details, review.fee_unverified);
+    const bool high_change = HasHighChangeIndex(review);
+    const auto note = high_change ? "Wallet recovery may miss this change. Confirm only if you can recover it." : "";
+    completed = ReviewScreen{high_change ? "Signed - high change index" : "Signed transaction - review",
+        TransactionLines(review), TransactionDetails(review), high_change};
+    auto lines = completed->summary;
+    lines.insert(lines.begin(), {"Check the destinations, amounts and fee before signing.", ""});
+    return terminal.Approve(high_change ? "Review - high change index" : "Review transaction",
+        lines, "SIGN", completed->details, high_change, note);
 }
 
 std::optional<QRMessage> SignRequest(Terminal& terminal, const Keys& keys, std::optional<ApprovedWallet>& loaded,
@@ -65,8 +73,8 @@ std::optional<QRMessage> SignRequest(Terminal& terminal, const Keys& keys, std::
                     "Check the network, recovery words and passphrase. Your wallet app must also include the correct key paths."});
                 return {};
             }
-            if (!terminal.Confirm("Wallet setup needed", {"This appears to be a multisig transaction, but the request does not include enough wallet information to check the complete setup.", "",
-                "Show the wallet setup or signer-registration QR in your wallet app, then scan it here."},
+            if (!terminal.Confirm("Wallet setup needed", {"This transaction needs more wallet information before it can be reviewed.", "",
+                "Show the wallet setup QR in your wallet app, then scan it here."},
                 "scan wallet setup")) return {};
             if (!LoadWallet(terminal, keys, loaded, scan())) return {};
             continue;
@@ -84,7 +92,7 @@ std::optional<QRMessage> SignRequest(Terminal& terminal, const Keys& keys, std::
         }
         while (true) {
             const auto selected = options.wallets.size() == 1 ? 0 : terminal.Menu("Choose a wallet to sign with", labels,
-                "Input counts are in parentheses. This pass signs for one wallet; existing signatures are kept.");
+                "This transaction uses more than one wallet. Choose which one to review. Matching input counts are in parentheses.");
             const auto result = options.wallets[selected].transaction->Sign(keys, approve);
             if (result) return QRMessage{"crypto-psbt", CborBytes({
                 reinterpret_cast<const uint8_t*>(result->psbt.data()), result->psbt.size()})};

@@ -67,12 +67,12 @@ SecretBytes ChineseMnemonic(Terminal& terminal, size_t count)
     const unsigned footer_row = rows - footer.size() - 1;
     Require(footer_row > page_row + 1, "The screen is too small for Chinese input.");
 
-    display.Text(left, 1, "Thunder Den", DIM);
-    display.Text(left, 2, "Enter your Chinese recovery words", BRIGHT);
-    display.Text(left, 3, std::string(width, '-'), DIM);
-    for (size_t i = 0; i < intro.size(); ++i) display.Text(left, 5 + i, intro[i]);
-    display.Text(left, footer_row - 1, std::string(width, '-'), DIM);
-    for (size_t i = 0; i < footer.size(); ++i) display.Text(left, footer_row + i, footer[i], DIM);
+    display.CellText(left, 1, "Thunder Den", DIM);
+    display.CellText(left, 2, "Enter your Chinese recovery words", BRIGHT);
+    display.CellText(left, 3, std::string(width, '-'), DIM);
+    for (size_t i = 0; i < intro.size(); ++i) display.CellText(left, 5 + i, intro[i]);
+    display.CellText(left, footer_row - 1, std::string(width, '-'), DIM);
+    for (size_t i = 0; i < footer.size(); ++i) display.CellText(left, footer_row + i, footer[i], DIM);
 
     std::vector<SecretBytes> words(count);
     SecretBytes pinyin;
@@ -85,23 +85,23 @@ SecretBytes ChineseMnemonic(Terminal& terminal, size_t count)
         candidates = PinyinCandidates(View(pinyin));
         for (unsigned row = error_row; row <= page_row; ++row) display.ClearRow(row);
         const auto message = Wrap({error}, width);
-        for (size_t i = 0; i < std::min<size_t>(message.size(), 2); ++i) display.Text(left, error_row + i, message[i], BRIGHT);
-        unsigned column = display.Text(left, input_row, "Word " + std::to_string(index + 1) + " of " + std::to_string(count) + ": ");
-        column = display.Text(column, input_row, View(pinyin), BRIGHT);
-        column = display.Text(column, input_row, "_   ", DIM);
+        for (size_t i = 0; i < std::min<size_t>(message.size(), 2); ++i) display.CellText(left, error_row + i, message[i], BRIGHT);
+        unsigned column = display.CellText(left, input_row, "Word " + std::to_string(index + 1) + " of " + std::to_string(count) + ": ");
+        column = display.CellText(column, input_row, View(pinyin), BRIGHT);
+        column = display.CellText(column, input_row, "_   ", DIM);
         if (!words[index].empty()) {
-            column = display.Text(column, input_row, "Chosen: ", DIM);
+            column = display.CellText(column, input_row, "Chosen: ", DIM);
             if (visible) display.Hanzi(column, input_row, HanziGlyph(ChineseWordIndex(View(words[index]))));
-            else display.Text(column, input_row, "*");
+            else display.CellText(column, input_row, "*");
         }
-        if (!pinyin.empty() && candidates.empty()) display.Text(left, candidate_row, "No recovery word has this pinyin.", DIM);
+        if (!pinyin.empty() && candidates.empty()) display.CellText(left, candidate_row, "No recovery word has this pinyin.", DIM);
         for (size_t i = 0; i < PAGE && page * PAGE + i < candidates.size(); ++i) {
             column = left + (i % per_row) * 6;
-            column = display.Text(column, candidate_row + i / per_row, std::string(1, char('1' + i)) + " ");
+            column = display.CellText(column, candidate_row + i / per_row, std::string(1, char('1' + i)) + " ");
             display.Hanzi(column, candidate_row + i / per_row, HanziGlyph(candidates[page * PAGE + i]), BRIGHT);
         }
         if (candidates.size() > PAGE) {
-            display.Text(left, page_row, "Page " + std::to_string(page + 1) + "/"
+            display.CellText(left, page_row, "Page " + std::to_string(page + 1) + "/"
                 + std::to_string((candidates.size() + PAGE - 1) / PAGE), DIM);
         }
     };

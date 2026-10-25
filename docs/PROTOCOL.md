@@ -16,6 +16,12 @@ Custom public-key exports may also use a case-sensitive static text QR.
 | Standard account key | `crypto-account` | One-way, script-typed public cosigner key and origin |
 | Custom public key | Plain text QR or `hdkey` | Public extended key and origin, without script-type assumptions |
 | Multisig setup | `crypto-output`, or text configuration inside `bytes` | Import and locally approve a supported public multisig account |
+| Address check | Plain address or `bitcoin:` URI | Local comparison against a chosen account or loaded multisig; no reply QR |
+
+Current source also recognises private [SeedQR and CompactSeedQR backups](SEED_QR.md).
+They are not UR commands or public replies: loading needs local confirmation,
+and an existing key session cannot be replaced by a scan. Preview 9 does not
+include this backup format support.
 
 ## Human-operated exchange
 
@@ -25,6 +31,37 @@ online client to scan. Animated frames are collected automatically within each
 scan. The computers can be repositioned between steps; continuous camera alignment
 is not required. Recovery input stays on the signer and should be completed before
 the online camera is pointed at its screen.
+
+## Plain address checks
+
+A single QR may contain a Bitcoin address or a `bitcoin:` payment URI, up to
+512 printable non-space ASCII bytes. The scheme is case-insensitive; address
+case is preserved for Bitcoin Core validation. Optional URI parameter values
+are ignored and never displayed or treated as payment instructions. Parameter
+names must be plain ASCII URI names; unknown `req-` parameters are rejected.
+This is address extraction and verification, not full payment-URI validation.
+
+The signer validates the destination for its selected network and compares scripts
+derived from one chosen BIP44/49/84/86 account or the already-approved multisig
+wallet in RAM. P2SH can be single-signature or multisig; a P2WSH address needs a
+compatible loaded setup. The standard Taproot check covers BIP86, not arbitrary
+Taproot policies. The selected network never changes; some test networks share
+address formats and cannot be distinguished by an address alone.
+
+The user confirms the account (normally 0) or chooses the loaded wallet. Each run
+checks up to 1,000 indices on both receiving and change branches. **Esc** stops without
+losing the address or position; the menu offers resume/continue, another account
+where applicable, or an exact address number. Indices start at 0 and extend through
+2,147,483,647; standard accounts are limited to 0 through 100. Searches never
+silently switch context or replace the loaded wallet. A range without a match
+does not establish that the address is unrelated to the wallet.
+
+A match displays the complete address, account/wallet, network and receiving/change
+position for comparison with the destination before sending. **d** shows public
+wallet details. Plain checks produce neither a reply QR nor a signature, and
+cannot replace an in-progress multipart UR stream. Structured address commands
+below already supply the policy and index and retain their direct review/reply
+flow. Plain address checks are available in preview 7 and later.
 
 ## Standard PSBT exchange
 
@@ -45,10 +82,11 @@ Every input needs valid previous-output data. Legacy/unclassified inputs require
 never permits conflicting amounts or scripts. For inputs it signs, Thunder Den accepts only `SIGHASH_ALL` outside Taproot
 and `SIGHASH_DEFAULT` for Taproot. Derivation metadata supplies candidate wallet
 positions; exact policy-script matches establish ownership and change. See
-[Signing](DESIGN.md#signing) for the validation and fee-assurance rules. Fees and
-affected totals remain qualified when input amounts are not protected by full
-previous transactions or the selected signatures' commitments. Signing those
-requests requires the explicit [fee warning](FEES.md), then transaction approval.
+[Signing](DESIGN.md#signing) for the validation and fee-assurance rules. Signing is
+refused before approval if any signature to be released leaves an input amount
+unprotected by full previous transactions or its signature commitments. There is
+no override; see [fee verification](FEES.md). Command-format requests use the same
+check and return invalid-request status `2` with an empty body.
 
 This route preserves standard PSBT QR exchange for wallets such as Sparrow using
 UR mode. It does not require the command format below. Each pass signs one policy
@@ -268,6 +306,11 @@ strings. The reply always reports the signer's actual local network and master f
 Status 3 is unused.
 Malformed requests must not reach local approval or signing.
 
+From preview 12, statuses 2, 4 and 5 are explained locally before showing the error
+response QR. The same explanation can be revisited from that QR without retrying
+the operation. Explicit cancellation remains distinct from an error. These local
+messages do not change the wire status codes or add diagnostic text to replies.
+
 Clients must discard late replies to cancelled requests. Cancelling on the online
 computer cannot remotely stop offline review; the user can press Esc on the
 signer. A new request gets a new ID. Optical capture and local review have no
@@ -277,6 +320,7 @@ separate from the time allowed to review a request.
 ## Bounds and assembly
 
 - Individual QR text: at most 4,296 ASCII characters.
+- Plain address/payment-URI QR: at most 512 bytes; a single complete frame.
 - Message: at most 2 MiB + 64 KiB of CBOR.
 - Command request: at most 1 MiB + 64 KiB, excluding its CBOR byte-string wrapper.
 - Incoming raw PSBT: at most 1 MiB.

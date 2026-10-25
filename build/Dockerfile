@@ -9,7 +9,7 @@ RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates curl g++ cmake ninja-build pkg-config libboost-dev libssl-dev python3 strace \
-      make meson bzip2 xz-utils libjpeg62-turbo-dev \
+      make meson bzip2 xz-utils libjpeg62-turbo-dev libjsoncpp-dev patch time \
     && rm -rf /var/lib/apt/lists/*
 
 ARG BITCOIN_VERSION
@@ -42,10 +42,12 @@ RUN curl --fail --location --retry 3 "$BIP39_CHINESE_WORDLIST_URL" -o /opt/bip39
 
 COPY .env /opt/inputs.env
 COPY build/native-deps.sh /work/build/native-deps.sh
+COPY build/nist-json-warning.patch /work/build/nist-json-warning.patch
 RUN sh /work/build/native-deps.sh
 
 FROM dependencies AS development
 COPY CMakeLists.txt /work/CMakeLists.txt
+COPY build/nist-progress.patch /work/build/nist-progress.patch
 COPY src /work/src
 COPY tests /work/tests
 RUN python3 -B /work/tests/core_keys.py --source-hash > /opt/bitcoin-source.sha256 \
@@ -58,6 +60,25 @@ RUN python3 -B /work/tests/core_keys.py --source-hash > /opt/bitcoin-source.sha2
     && python3 -B /work/tests/core_keys.py --source-hash > /tmp/source-after.sha256 \
     && cmp /opt/bitcoin-source.sha256 /tmp/source-after.sha256
 COPY platform/overlay/usr/bin/thunderden-session /work/platform/overlay/usr/bin/thunderden-session
+
+FROM ${DEBIAN_BASE_IMAGE} AS boot-tools
+ARG DEBIAN_SNAPSHOT
+RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* \
+    && printf '%s\n' \
+      "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie main" \
+      "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ trixie-security main" \
+      > /etc/apt/sources.list \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3 openssl sbsigntool mtools dosfstools \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /work
+
+FROM boot-tools AS boot-tests
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      gcc binutils gnu-efi python3-virt-firmware qemu-system-x86 ovmf \
+    && rm -rf /var/lib/apt/lists/*
 
 FROM dependencies AS image-builder
 RUN apt-get update \

@@ -5,6 +5,7 @@
 #include <termios.h>
 
 namespace td {
+enum class ManualSource : unsigned char;
 struct Cancelled {};
 enum NavigationKey { KEY_UP = 256, KEY_DOWN, KEY_RIGHT, KEY_LEFT };
 struct SecretInput {
@@ -34,7 +35,8 @@ class Terminal {
     void Draw(const Layout& view, std::string_view title, const ReviewLines& rows,
         std::string_view footer, int selected = -1, std::string_view pager = {}, bool warning = false);
     bool Pages(std::string_view title, const ReviewLines& lines, std::string_view action,
-        const ReviewLines& details, PageMode mode, bool warning = false);
+        const ReviewLines& details, PageMode mode, bool warning = false, std::string_view summary_prompt = {},
+        const std::function<void()>& show_backup = {}, std::string_view show_label = {});
 public:
     Terminal();
     explicit Terminal(int owned_fd);
@@ -45,17 +47,29 @@ public:
     int Key(int timeout_ms = -1);
     void Flush();
     void SetNetwork(std::string_view network) { network_ = network; }
+    std::string_view Network() const { return network_; }
     void Screen(std::string_view title, const ReviewLines& lines, std::string_view footer);
     int Menu(std::string_view title, const ReviewLines& choices, std::string_view introduction = {},
-        bool cancellable = true, std::string_view status = {});
+        bool cancellable = true, std::string_view status = {}, bool keep_introduction = false, const ReviewLines& details = {},
+        const ReviewLines& identity = {});
     SecretBytes Input(std::string_view title, const ReviewLines& introduction, std::string_view prompt,
-        size_t limit, SecretInput* secret = nullptr, SecretBytes initial = {}, std::string error = {}, bool warning = false);
+        size_t limit, SecretInput* secret = nullptr, SecretBytes initial = {}, std::string error = {}, bool warning = false,
+        std::string_view help = {});
     // Framebuffer Chinese entry is injected so terminal-only programs do not link display code.
     using ChineseInput = std::function<SecretBytes(Terminal&, size_t count)>;
-    SecretBytes Mnemonic(const ChineseInput& chinese = {});
+    // A zero count asks for the phrase length; Chinese entry is offered only then.
+    SecretBytes Mnemonic(unsigned count = 0, const ChineseInput& chinese = {});
+    SecretBytes ManualEntropy(ManualSource source, unsigned words);
+    void BackupWords(std::span<const unsigned char> mnemonic, bool reviewing = false);
+    bool ReviewRecoveryWords(std::span<const unsigned char> mnemonic, const ReviewScreen& review);
+    // No value means interrupted capture; an empty value means a completed capture was omitted.
+    std::optional<SecretBytes> CameraEntropy(bool& unchecked);
+    std::optional<Position> SearchAddress(const Policy& policy, const CScript& script,
+        std::string_view wallet, uint32_t& next, uint32_t end);
     bool Approve(std::string_view title, const ReviewLines& lines, std::string_view confirmation, const ReviewLines& details = {},
         bool warning = false, std::string_view confirmation_note = {});
-    bool Confirm(std::string_view title, const ReviewLines& lines, std::string_view action, const ReviewLines& details = {}, bool warning = false);
+    bool Confirm(std::string_view title, const ReviewLines& lines, std::string_view action, const ReviewLines& details = {},
+        bool warning = false, std::string_view summary_prompt = {});
     bool Revisit(const ReviewScreen& review);
     void Notice(std::string_view title, const ReviewLines& lines);
     bool SessionEnded();
